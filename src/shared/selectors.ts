@@ -1,7 +1,7 @@
 import { getActiveSession, getActiveSessionStatus } from './practice';
 import { getPendingSessionCount, getTodayScheduleView } from './schedule';
 import { AppSnapshot, AppState, HistoryPoint, TopicScore, TopicTag } from './types';
-import { formatDateLabel, formatDuration, formatTimeLabel, parseSlotId, toDateKey } from './time';
+import { buildLocalDate, formatDateLabel, formatDuration, formatTimeLabel, parseSlotId, toDateKey } from './time';
 
 const TOPIC_LABELS: Record<TopicTag, string> = {
   binary_bce_backprop: 'Binary BCE backprop',
@@ -15,9 +15,10 @@ const TOPIC_LABELS: Record<TopicTag, string> = {
 
 function buildHistory(state: AppState, now: Date): HistoryPoint[] {
   const days: HistoryPoint[] = [];
+  const anchorDate = buildLocalDate(toDateKey(now, state.settings.timezone), 12, 0, state.settings.timezone);
   for (let offset = 6; offset >= 0; offset -= 1) {
-    const day = new Date(now);
-    day.setDate(now.getDate() - offset);
+    const day = new Date(anchorDate);
+    day.setUTCDate(anchorDate.getUTCDate() - offset);
     const dateKey = toDateKey(day, state.settings.timezone);
     const completed = state.sessions.filter(
       (session) =>

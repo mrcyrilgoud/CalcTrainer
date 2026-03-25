@@ -1,3 +1,4 @@
+import { normalizeTimezone } from './settings';
 import { AppSettings } from './types';
 
 type TimeParts = {
@@ -17,14 +18,15 @@ function getSystemTimezone(): string {
 }
 
 function getDateTimeFormatter(timeZone: string): Intl.DateTimeFormat {
-  const cacheKey = `datetime:${timeZone}`;
+  const normalizedTimezone = normalizeTimezone(timeZone);
+  const cacheKey = `datetime:${normalizedTimezone}`;
   const cached = dateTimeFormatterCache.get(cacheKey);
   if (cached) {
     return cached;
   }
 
   const formatter = new Intl.DateTimeFormat('en-US', {
-    timeZone,
+    timeZone: normalizedTimezone,
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
@@ -38,7 +40,8 @@ function getDateTimeFormatter(timeZone: string): Intl.DateTimeFormat {
 }
 
 function getLabelFormatter(timeZone: string, kind: 'time' | 'date'): Intl.DateTimeFormat {
-  const cacheKey = `${kind}:${timeZone}`;
+  const normalizedTimezone = normalizeTimezone(timeZone);
+  const cacheKey = `${kind}:${normalizedTimezone}`;
   const cached = labelFormatterCache.get(cacheKey);
   if (cached) {
     return cached;
@@ -46,12 +49,12 @@ function getLabelFormatter(timeZone: string, kind: 'time' | 'date'): Intl.DateTi
 
   const formatter = new Intl.DateTimeFormat('en-US', kind === 'time'
     ? {
-        timeZone,
+        timeZone: normalizedTimezone,
         hour: 'numeric',
         minute: '2-digit'
       }
     : {
-        timeZone,
+        timeZone: normalizedTimezone,
         month: 'short',
         day: 'numeric'
       });
