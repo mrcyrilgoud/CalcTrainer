@@ -35,4 +35,24 @@ describe('scheduler', () => {
       ['2026-03-23T19:00', 'upcoming']
     ]);
   });
+
+  it('returns the same state object when no sessions are added or activated', () => {
+    const queued = queueDueSessions(createDefaultState(makeDate(8, 30)), makeDate(14, 15)).state;
+    const result = queueDueSessions(queued, makeDate(14, 15));
+
+    expect(result.createdSessionIds).toHaveLength(0);
+    expect(result.activatedSessionId).toBeUndefined();
+    expect(result.state).toBe(queued);
+  });
+
+  it('uses the configured timezone when computing due slots', () => {
+    const state = createDefaultState(new Date('2026-03-23T23:00:00.000Z'));
+    state.settings.timezone = 'Asia/Tokyo';
+
+    const result = queueDueSessions(state, new Date('2026-03-24T00:30:00.000Z'));
+
+    expect(result.createdSessionIds).toEqual(['2026-03-24T09:00']);
+    expect(result.activatedSessionId).toBe('2026-03-24T09:00');
+    expect(result.state.sessions[0]?.scheduledFor).toBe('2026-03-24T00:00:00.000Z');
+  });
 });

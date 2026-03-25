@@ -8,6 +8,14 @@ function createEmptyWeakTopicScores(): Record<TopicTag, number> {
   return Object.fromEntries(TOPIC_TAGS.map((topicTag) => [topicTag, 0])) as Record<TopicTag, number>;
 }
 
+function getBackupFilePath(filePath: string): string {
+  return `${filePath}.bak`;
+}
+
+function getCorruptFilePath(filePath: string): string {
+  return `${filePath}.corrupt-${Date.now()}`;
+}
+
 function hydrateSession(rawSession: Partial<PracticeSession>): PracticeSession | null {
   if (!rawSession.id || !rawSession.slotId || !rawSession.scheduledFor || !rawSession.questions) {
     return null;
@@ -74,17 +82,74 @@ export function serializeState(state: AppState): string {
   return JSON.stringify(state, null, 2);
 }
 
-export function loadStateFile(filePath: string): AppState {
+function tryLoadStateFile(filePath: string): { state?: AppState; error?: unknown; exists: boolean } {
   try {
     const rawContents = fs.readFileSync(filePath, 'utf8');
     const parsed = JSON.parse(rawContents) as Partial<AppState>;
-    return hydrateState(parsed);
-  } catch {
-    return createDefaultState();
+    return {
+      state: hydrateState(parsed),
+      exists: true
+    };
+  } catch (error) {
+    return {
+      error,
+      exists: fs.existsSync(filePath)
+    };
   }
+}
+
+function archiveCorruptFile(filePath: string): void {
+  if (!fs.existsSync(filePath)) {
+    return;
+  }
+
+  const corruptFilePath = getCorruptFilePath(filePath);
+  try {
+    fs.renameSync(filePath, corruptFilePath);
+    console.error(`CalcTrainer archived unreadable state at ${corruptFilePath}.`);
+  } catch (error) {
+    console.error(`CalcTrainer could not archive unreadable state at ${filePath}.`, error);
+  }
+}
+
+export function loadStateFile(filePath: string): AppState {
+  const primaryResult = tryLoadStateFile(filePath);
+  if (primaryResult.state) {
+    return primaryResult.state;
+  }
+
+  const backupPath = getBackupFilePath(filePath);
+  const backupResult = tryLoadStateFile(backupPath);
+  if (backupResult.state) {
+    if (primaryResult.exists) {
+      console.error(`CalcTrainer recovered state from backup ${backupPath}.`, primaryResult.error);
+      archiveCorruptFile(filePath);
+    }
+    return backupResult.state;
+  }
+
+  if (primaryResult.exists) {
+    console.error(`CalcTrainer could not read state file ${filePath}.`, primaryResult.error);
+    archiveCorruptFile(filePath);
+  }
+  if (backupResult.exists) {
+    console.error(`CalcTrainer could not read backup state file ${backupPath}.`, backupResult.error);
+  }
+
+  return createDefaultState();
 }
 
 export function saveStateFile(filePath: string, state: AppState): void {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, serializeState(state), 'utf8');
+  const tempFilePath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+  fs.writeFileSync(tempFilePath, serializeState(state), 'utf8');
+
+  try {
+    fs.renameSync(tempFilePath, filePath);
+    fs.copyFileSync(filePath, getBackupFilePath(filePath));
+  } finally {
+    if (fs.existsSync(tempFilePath)) {
+      fs.rmSync(tempFilePath, { force: true });
+    }
+  }
 }

@@ -18,9 +18,11 @@ function buildHistory(state: AppState, now: Date): HistoryPoint[] {
   for (let offset = 6; offset >= 0; offset -= 1) {
     const day = new Date(now);
     day.setDate(now.getDate() - offset);
-    const dateKey = toDateKey(day);
+    const dateKey = toDateKey(day, state.settings.timezone);
     const completed = state.sessions.filter(
-      (session) => session.status === 'completed' && toDateKey(new Date(session.completedAt ?? session.scheduledFor)) === dateKey
+      (session) =>
+        session.status === 'completed'
+        && toDateKey(new Date(session.completedAt ?? session.scheduledFor), state.settings.timezone) === dateKey
     ).length;
     days.push({ dateKey, completed });
   }
@@ -61,8 +63,8 @@ export function buildSnapshot(state: AppState, now: Date): AppSnapshot {
 
   let overdueSummary: string | null = null;
   if (activeSession) {
-    const slotDate = parseSlotId(activeSession.slotId);
-    overdueSummary = `Active session from ${formatDateLabel(slotDate)} at ${formatTimeLabel(slotDate)}. ${activeSessionStatus?.canComplete ? 'You can finish it now.' : `Minimum timer remaining: ${formatDuration(activeSessionStatus?.remainingMs ?? 0)}.`}`;
+    const slotDate = parseSlotId(activeSession.slotId, state.settings.timezone);
+    overdueSummary = `Active session from ${formatDateLabel(slotDate, state.settings.timezone)} at ${formatTimeLabel(slotDate, state.settings.timezone)}. ${activeSessionStatus?.canComplete ? 'You can finish it now.' : `Minimum timer remaining: ${formatDuration(activeSessionStatus?.remainingMs ?? 0)}.`}`;
   }
 
   return {

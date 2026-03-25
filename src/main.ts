@@ -22,7 +22,7 @@ import {
   revealWorkedSolution,
   submitAnswer
 } from './shared/practice';
-import { createDefaultState, loadStateFile, saveStateFile, serializeState } from './shared/storage';
+import { createDefaultState, loadStateFile, saveStateFile } from './shared/storage';
 import { AppSettings, AppSnapshot, AppState, SelfCheckRating } from './shared/types';
 
 let dashboardWindow: BrowserWindow | null = null;
@@ -54,18 +54,18 @@ function getSettings(): AppSettings {
   return appState.settings;
 }
 
-function persistStateIfChanged(previousState: AppState): void {
-  if (serializeState(previousState) === serializeState(appState)) {
+function persistStateIfChanged(previousState: AppState, options: { skipWebContentsId?: number } = {}): void {
+  if (previousState === appState) {
     return;
   }
   saveStateFile(getStateFilePath(), appState);
-  broadcastSnapshot();
+  broadcastSnapshot(options);
 }
 
-function broadcastSnapshot(): void {
+function broadcastSnapshot(options: { skipWebContentsId?: number } = {}): void {
   const snapshot = buildSnapshotNow();
   for (const candidate of [dashboardWindow, practiceWindow]) {
-    if (candidate && !candidate.isDestroyed()) {
+    if (candidate && !candidate.isDestroyed() && candidate.webContents.id !== options.skipWebContentsId) {
       candidate.webContents.send('snapshot:updated', snapshot);
     }
   }
@@ -210,7 +210,7 @@ function showNotification(title: string, body: string): void {
   notification.show();
 }
 
-async function promptSession(sessionId: string, body: string): Promise<void> {
+async function promptSession(sessionId: string, body: string, options: { skipWebContentsId?: number } = {}): Promise<void> {
   const session = findSession(appState, sessionId);
   if (!session) {
     return;
@@ -218,7 +218,7 @@ async function promptSession(sessionId: string, body: string): Promise<void> {
 
   const previousState = appState;
   appState = markSessionPrompted(appState, sessionId, new Date());
-  persistStateIfChanged(previousState);
+  persistStateIfChanged(previousState, options);
   showNotification('CalcTrainer session due', body);
   if (process.platform === 'darwin' && app.dock) {
     app.dock.bounce('critical');
@@ -270,7 +270,7 @@ function registerIpc(): void {
   ipcMain.handle(
     'settings:update',
     (
-      _event,
+      event,
       payload: Partial<Pick<AppSettings, 'enforcementStyle' | 'lighterReopenDelayMinutes'>>
     ) => {
       const nextSettings = sanitizeSettings({
@@ -287,7 +287,7 @@ function registerIpc(): void {
         ...appState,
         settings: nextSettings
       };
-      persistStateIfChanged(previousState);
+      persistStateIfChanged(previousState, { skipWebContentsId: event.sender.id });
       if (practiceWindow && !practiceWindow.isDestroyed()) {
         const keepOnTop = shouldKeepPracticeWindowOnTop(getSettings());
         practiceWindow.setAlwaysOnTop(keepOnTop, keepOnTop ? 'floating' : 'normal');
@@ -295,35 +295,37 @@ function registerIpc(): void {
       return buildSnapshotNow();
     }
   );
-  ipcMain.handle('session:submit-answer', (_event, payload: { sessionId: string; questionId: string; answerText: string }) => {
+  ipcMain.handle('session:submit-answer', (event, payload: { sessionId: string; questionId: string; answerText: string }) => {
     const previousState = appState;
     const result = submitAnswer(appState, payload.sessionId, payload.questionId, payload.answerText, new Date());
     appState = result.state;
-    persistStateIfChanged(previousState);
+    persistStateIfChanged(previousState, { skipWebContentsId: event.sender.id });
     return {
       evaluation: result.evaluation,
       snapshot: buildSnapshotNow()
     };
   });
-  ipcMain.handle('session:reveal-solution', (_event, payload: { sessionId: string; questionId: string }) => {
+  ipcMain.handle('session:reveal-solution', (event, payload: { sessionId: string; questionId: string }) => {
     const previousState = appState;
     appState = revealWorkedSolution(appState, payload.sessionId, payload.questionId, new Date());
-    persistStateIfChanged(previousState);
+    persistStateIfChanged(previousState, { skipWebContentsId: event.sender.id });
     return buildSnapshotNow();
   });
-  ipcMain.handle('session:self-check', (_event, payload: { sessionId: string; questionId: string; rating: SelfCheckRating }) => {
+  ipcMain.handle('session:self-check', (event, payload: { sessionId: string; questionId: string; rating: SelfCheckRating }) => {
     const previousState = appState;
     appState = recordSelfCheck(appState, payload.sessionId, payload.questionId, payload.rating);
-    persistStateIfChanged(previousState);
+    persistStateIfChanged(previousState, { skipWebContentsId: event.sender.id });
     return buildSnapshotNow();
   });
-  ipcMain.handle('session:complete', async (_event, payload: { sessionId: string }) => {
+  ipcMain.handle('session:complete', async (event, payload: { sessionId: string }) => {
     const previousState = appState;
     const completion = completeSession(appState, payload.sessionId, new Date());
     appState = completion.state;
-    persistStateIfChanged(previousState);
+    persistStateIfChanged(previousState, { skipWebContentsId: event.sender.id });
     if (completion.completed && completion.activatedSessionId) {
-      await promptSession(completion.activatedSessionId, 'Another overdue session is queued and now active.');
+      await promptSession(completion.activatedSessionId, 'Another overdue session is queued and now active.', {
+        skipWebContentsId: event.sender.id
+      });
     }
     return {
       ok: completion.completed,

@@ -1,3 +1,7 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -6,7 +10,7 @@ import {
   MIN_LIGHTER_REOPEN_DELAY_MINUTES
 } from '../src/shared/settings';
 import { getQuestionBankCoverage } from '../src/shared/questions';
-import { createDefaultState, hydrateState, serializeState } from '../src/shared/storage';
+import { createDefaultState, hydrateState, loadStateFile, saveStateFile, serializeState } from '../src/shared/storage';
 import { queueDueSessions } from '../src/shared/schedule';
 import { TOPIC_TAGS } from '../src/shared/types';
 
@@ -54,5 +58,22 @@ describe('storage and question coverage', () => {
 
     expect(clampedLow.settings.lighterReopenDelayMinutes).toBe(MIN_LIGHTER_REOPEN_DELAY_MINUTES);
     expect(clampedHigh.settings.lighterReopenDelayMinutes).toBe(MAX_LIGHTER_REOPEN_DELAY_MINUTES);
+  });
+
+  it('recovers from a corrupt primary state file using the backup copy', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'calctrainer-storage-'));
+    const filePath = path.join(tempDir, 'calc-trainer-state.json');
+    const dueState = queueDueSessions(createDefaultState(new Date(2026, 2, 23, 8, 0)), new Date(2026, 2, 23, 11, 1)).state;
+
+    saveStateFile(filePath, dueState);
+    fs.writeFileSync(filePath, '{"broken"', 'utf8');
+
+    const restored = loadStateFile(filePath);
+    const archivedFiles = fs.readdirSync(tempDir).filter((fileName) => fileName.includes('.corrupt-'));
+
+    expect(restored.activeSessionId).toBe(dueState.activeSessionId);
+    expect(restored.sessions).toHaveLength(dueState.sessions.length);
+    expect(archivedFiles).toHaveLength(1);
+    expect(fs.existsSync(`${filePath}.bak`)).toBe(true);
   });
 });

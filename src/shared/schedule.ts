@@ -2,24 +2,6 @@ import { createPracticeSession, activateNextPendingSession } from './practice';
 import { AppState, PracticeSession, ScheduleSlotView } from './types';
 import { buildSlotId, formatTimeLabel, getDailySlotHours, parseSlotId, toDateKey } from './time';
 
-function cloneState(state: AppState): AppState {
-  return {
-    ...state,
-    settings: {
-      ...state.settings,
-      activeHours: { ...state.settings.activeHours }
-    },
-    sessions: state.sessions.map((session) => ({
-      ...session,
-      questions: session.questions.map((question) => ({ ...question })),
-      responses: Object.fromEntries(
-        Object.entries(session.responses).map(([questionId, progress]) => [questionId, { ...progress }])
-      )
-    })),
-    weakTopicScores: { ...state.weakTopicScores }
-  };
-}
-
 function sortSessions(sessions: PracticeSession[]): PracticeSession[] {
   return [...sessions].sort((left, right) => left.scheduledFor.localeCompare(right.scheduledFor));
 }
@@ -28,29 +10,42 @@ export function queueDueSessions(
   state: AppState,
   now: Date
 ): { state: AppState; createdSessionIds: string[]; activatedSessionId?: string } {
-  const workingState = cloneState(state);
-  const todayKey = toDateKey(now);
+  const todayKey = toDateKey(now, state.settings.timezone);
   const createdSessionIds: string[] = [];
+  const existingSlotIds = new Set(state.sessions.map((session) => session.slotId));
+  let nextSessions = state.sessions;
 
-  for (const hour of getDailySlotHours(workingState.settings)) {
+  for (const hour of getDailySlotHours(state.settings)) {
     const slotId = buildSlotId(todayKey, hour);
-    const slotDate = parseSlotId(slotId);
+    const slotDate = parseSlotId(slotId, state.settings.timezone);
     if (slotDate.getTime() > now.getTime()) {
       continue;
     }
 
-    const existingSession = workingState.sessions.find((session) => session.slotId === slotId);
-    if (existingSession) {
+    if (existingSlotIds.has(slotId)) {
       continue;
     }
 
+    if (nextSessions === state.sessions) {
+      nextSessions = state.sessions.slice();
+    }
+    const workingState = {
+      ...state,
+      sessions: nextSessions
+    };
     const session = createPracticeSession(workingState, slotId, slotDate.toISOString());
-    workingState.sessions.push(session);
+    nextSessions.push(session);
+    existingSlotIds.add(slotId);
     createdSessionIds.push(session.id);
   }
 
-  workingState.sessions = sortSessions(workingState.sessions);
-  const activation = activateNextPendingSession(workingState, now);
+  const baseState = nextSessions === state.sessions
+    ? state
+    : {
+        ...state,
+        sessions: sortSessions(nextSessions)
+      };
+  const activation = activateNextPendingSession(baseState, now);
   return {
     state: activation.state,
     createdSessionIds,
@@ -59,10 +54,10 @@ export function queueDueSessions(
 }
 
 export function getTodayScheduleView(state: AppState, now: Date): ScheduleSlotView[] {
-  const todayKey = toDateKey(now);
+  const todayKey = toDateKey(now, state.settings.timezone);
   return getDailySlotHours(state.settings).map((hour) => {
     const slotId = buildSlotId(todayKey, hour);
-    const slotDate = parseSlotId(slotId);
+    const slotDate = parseSlotId(slotId, state.settings.timezone);
     const session = state.sessions.find((candidate) => candidate.slotId === slotId);
     let status: ScheduleSlotView['status'] = 'upcoming';
 
@@ -77,7 +72,7 @@ export function getTodayScheduleView(state: AppState, now: Date): ScheduleSlotVi
     return {
       slotId,
       scheduledFor: slotDate.toISOString(),
-      label: formatTimeLabel(slotDate),
+      label: formatTimeLabel(slotDate, state.settings.timezone),
       status
     };
   });

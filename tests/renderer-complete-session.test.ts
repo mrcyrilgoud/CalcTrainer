@@ -151,6 +151,8 @@ describe('renderer practice flow', () => {
     await Promise.resolve();
 
     expect(completeSession).toHaveBeenCalledWith({ sessionId: 'session-1' });
+    expect(document.querySelector('[data-view="practice-empty"]')).not.toBeNull();
+    expect(document.querySelector('[data-question-card]')).toBeNull();
   });
 
   it('routes practice window.close through hidePracticeWindow while a session is active', async () => {
@@ -295,6 +297,134 @@ describe('renderer practice flow', () => {
     expect(nextInput?.value).toBe('draft');
   });
 
+  it('only replaces the question card that changed after answer submission', async () => {
+    const baseSnapshot: StubSnapshot = {
+      now: new Date().toISOString(),
+      settings: baseSettings,
+      streakDays: 0,
+      completedToday: 0,
+      pendingCount: 1,
+      overdueSummary: 'Active session pending.',
+      weakTopics: [],
+      history: [],
+      schedule: [],
+      activeSessionStatus: {
+        answeredCount: 0,
+        totalQuestions: 2,
+        minDurationMet: false,
+        remainingMs: 60_000,
+        canComplete: false
+      },
+      activeSession: {
+        id: 'session-1',
+        slotId: '2026-03-24T09:00',
+        scheduledFor: '2026-03-24T16:00:00.000Z',
+        status: 'active',
+        startedAt: new Date().toISOString(),
+        minDurationMs: 10 * 60_000,
+        targetDurationMs: 15 * 60_000,
+        questions: [
+          {
+            id: 'q1',
+            title: 'Binary Output Delta',
+            source: 'Lecture 4.pdf',
+            topicTag: 'binary_bce_backprop',
+            promptType: 'structured',
+            stem: 'Write dL/dz^(2).',
+            workedSolution: 'a^(2) - y',
+            answerSchema: {
+              kind: 'structured',
+              acceptableAnswers: ['a^(2)-y'],
+              placeholder: 'a^(2) - y'
+            }
+          },
+          {
+            id: 'q2',
+            title: 'Learning Rate Failure Mode',
+            source: 'Lecture 5.pdf',
+            topicTag: 'learning_rate_and_optimizer',
+            promptType: 'multiple_choice',
+            stem: 'What happens when the learning rate is too high?',
+            workedSolution: 'Overshoot.',
+            answerSchema: {
+              kind: 'multiple_choice',
+              options: ['Wrong', 'Correct'],
+              correctIndex: 1
+            }
+          }
+        ],
+        responses: {
+          q1: {},
+          q2: {}
+        }
+      }
+    };
+
+    const submitAnswer = vi.fn().mockResolvedValue({
+      snapshot: {
+        ...baseSnapshot,
+        activeSessionStatus: {
+          answeredCount: 1,
+          totalQuestions: 2,
+          minDurationMet: false,
+          remainingMs: 60_000,
+          canComplete: false
+        },
+        activeSession: {
+          ...baseSnapshot.activeSession,
+          responses: {
+            q1: {
+              answerText: 'a^(2)-y',
+              evaluation: {
+                correct: true,
+                feedback: 'Correct.'
+              }
+            },
+            q2: {}
+          }
+        }
+      }
+    });
+
+    Object.assign(window, {
+      calcTrainer: {
+        getSnapshot: vi.fn().mockResolvedValue(baseSnapshot),
+        openDashboard: vi.fn().mockResolvedValue(baseSnapshot),
+        openPractice: vi.fn().mockResolvedValue(baseSnapshot),
+        hidePracticeWindow: vi.fn().mockResolvedValue(baseSnapshot),
+        updateSettings: vi.fn().mockResolvedValue(baseSnapshot),
+        submitAnswer,
+        revealSolution: vi.fn(),
+        selfCheck: vi.fn(),
+        completeSession: vi.fn(),
+        onSnapshot: vi.fn(() => () => undefined)
+      }
+    });
+
+    await import('../src/renderer/renderer');
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const originalQ1 = document.querySelector('[data-question-card="q1"]');
+    const originalQ2 = document.querySelector('[data-question-card="q2"]');
+    const q1Input = document.querySelector('input[data-question-id="q1"]') as HTMLInputElement | null;
+    const q1Submit = document.querySelector('button[data-action="submit-answer"][data-question-id="q1"]') as HTMLButtonElement | null;
+
+    expect(originalQ1).not.toBeNull();
+    expect(originalQ2).not.toBeNull();
+    expect(q1Input).not.toBeNull();
+    expect(q1Submit).not.toBeNull();
+
+    q1Input!.value = 'a^(2)-y';
+    q1Input!.dispatchEvent(new Event('input', { bubbles: true }));
+    q1Submit!.click();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(document.querySelector('[data-question-card="q1"]')).not.toBe(originalQ1);
+    expect(document.querySelector('[data-question-card="q2"]')).toBe(originalQ2);
+  });
+
   it('updates enforcement style from the dashboard controls', async () => {
     window.history.replaceState({}, '', '?mode=dashboard');
 
@@ -349,6 +479,8 @@ describe('renderer practice flow', () => {
     await Promise.resolve();
 
     expect(updateSettings).toHaveBeenCalledWith({ enforcementStyle: 'strict' });
+    expect(document.querySelector('button[data-style="strict"]')?.className).toContain('selected');
+    expect(document.querySelector('button[data-style="lighter"]')?.className).not.toContain('selected');
   });
 
   it('keeps the lighter-delay dashboard input stable across the 1-second dashboard tick', async () => {
@@ -424,7 +556,7 @@ describe('renderer practice flow', () => {
       ...baseSnapshot,
       settings: {
         ...baseSettings,
-        lighterReopenDelayMinutes: 7
+        lighterReopenDelayMinutes: 30
       }
     });
 
@@ -455,13 +587,14 @@ describe('renderer practice flow', () => {
     expect(input).not.toBeNull();
     expect(saveButton).toBeDefined();
 
-    input!.value = '7';
+    input!.value = '999';
     input!.dispatchEvent(new Event('input', { bubbles: true }));
     saveButton?.click();
     await Promise.resolve();
     await Promise.resolve();
 
-    expect(updateSettings).toHaveBeenCalledWith({ lighterReopenDelayMinutes: 7 });
+    expect(updateSettings).toHaveBeenCalledWith({ lighterReopenDelayMinutes: 999 });
+    expect((document.querySelector('[data-setting-field="lighter-reopen-delay"]') as HTMLInputElement | null)?.value).toBe('30');
   });
 
   it('routes Completed by paper through revealSolution for typed-answer questions', async () => {
