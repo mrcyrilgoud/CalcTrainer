@@ -1,0 +1,55 @@
+{
+  "name": "calctrainer",
+  "version": "1.0.0",
+  "description": "Mandatory macOS deep-learning calculus practice app built with Electron.",
+  "main": "dist/main/main.js",
+  "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.main.json && tsc -p tsconfig.renderer.json && node scripts/copy-static.mjs",
+    "start": "npm run build && electron .",
+    "dev": "npm run start",
+    "package:dir": "npm run build && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac dir",
+    "package:mac": "npm run build && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac dmg zip",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.main.json --noEmit && tsc -p tsconfig.renderer.json --noEmit"
+  },
+  "keywords": [
+    "electron",
+    "calculus",
+    "deep-learning",
+    "productivity"
+  ],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^25.5.0",
+    "electron": "^41.0.3",
+    "electron-builder": "^26.8.1",
+    "jsdom": "^29.0.1",
+    "typescript": "^6.0.2",
+    "vitest": "^4.1.1"
+  },
+  "build": {
+    "appId": "com.mrcyrilgoud.calctrainer",
+    "productName": "CalcTrainer",
+    "asar": true,
+    "directories": {
+      "buildResources": "assets",
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "package.json"
+    ],
+    "artifactName": "${productName}-${version}-${arch}.${ext}",
+    "mac": {
+      "category": "public.app-category.education",
+      "icon": "assets/icon.icns",
+      "target": [
+        "dmg",
+        "zip"
+      ]
+    }
+  }
+}
