@@ -102,6 +102,7 @@ const mode = new URLSearchParams(window.location.search).get('mode') === 'practi
 const nativeWindowClose = window.close.bind(window);
 
 let snapshot: AppSnapshot | null = null;
+let renderedSnapshot: AppSnapshot | null = null;
 let bannerMessage = '';
 const draftAnswers: Record<string, string> = {};
 
@@ -327,6 +328,7 @@ function formatMathCopy(input: string): string {
 
 function formatNow(): string {
   return new Intl.DateTimeFormat('en-US', {
+    timeZone: snapshot?.settings.timezone,
     weekday: 'short',
     hour: 'numeric',
     minute: '2-digit'
@@ -335,6 +337,15 @@ function formatNow(): string {
 
 function setBanner(message: string): void {
   bannerMessage = message;
+  if (!renderedSnapshot) {
+    render();
+    return;
+  }
+  updateBannerRegions();
+}
+
+function applySnapshot(nextSnapshot: AppSnapshot): void {
+  snapshot = nextSnapshot;
   render();
 }
 
@@ -404,8 +415,9 @@ function formatDuration(ms: number): string {
   return `${minutes}m`;
 }
 
-function formatDate(dateIso: string): string {
+function formatDate(dateIso: string, timeZone?: string): string {
   return new Intl.DateTimeFormat('en-US', {
+    timeZone,
     month: 'short',
     day: 'numeric',
     hour: 'numeric',
@@ -423,155 +435,221 @@ function getDraftLighterDelay(): string {
   return String(snapshot?.settings.lighterReopenDelayMinutes ?? '');
 }
 
-function renderDashboard(snapshotValue: AppSnapshot): string {
+function renderBanner(): string {
+  return bannerMessage ? `<div class="status-banner">${escapeHtml(bannerMessage)}</div>` : '';
+}
+
+function createElementFromHtml<T extends Element>(html: string): T {
+  const template = document.createElement('template');
+  template.innerHTML = html.trim();
+  return template.content.firstElementChild as T;
+}
+
+function replaceSection(sectionName: string, html: string): void {
+  const current = appElement?.querySelector<HTMLElement>(`[data-section="${sectionName}"]`);
+  if (!current) {
+    return;
+  }
+  current.replaceWith(createElementFromHtml<HTMLElement>(html));
+}
+
+function updateBannerRegions(): void {
+  if (!appElement) {
+    return;
+  }
+
+  const bannerHtml = renderBanner();
+  for (const region of appElement.querySelectorAll<HTMLElement>('[data-live="banner-region"]')) {
+    region.innerHTML = bannerHtml;
+  }
+}
+
+function renderDashboardHero(snapshotValue: AppSnapshot): string {
+  return `
+    <article class="card hero" data-section="dashboard-hero">
+      <div data-live="banner-region">${renderBanner()}</div>
+      <h2 class="card-title">Mandatory practice with the actual course calculus</h2>
+      <p>
+        Every two hours between 9 AM and 9 PM, CalcTrainer queues a deep-learning calculus session based on Lectures 4-6 and Assignment 5.
+        Sessions stay overdue until you complete the 10-minute minimum and finish the question set.
+      </p>
+      <div class="actions">
+        <button class="primary" data-action="open-practice" ${snapshotValue.activeSession ? '' : 'disabled'}>
+          ${snapshotValue.activeSession ? 'Open active session' : 'No active session yet'}
+        </button>
+        <button class="secondary" data-action="refresh-dashboard">Refresh state</button>
+      </div>
+    </article>
+  `;
+}
+
+function renderDashboardSchedule(snapshotValue: AppSnapshot): string {
+  return `
+    <article class="card" data-section="dashboard-schedule">
+      <h2 class="card-title">Today's schedule</h2>
+      <div class="schedule-grid">
+        ${snapshotValue.schedule
+          .map(
+            (slot) => `
+            <div class="slot-card ${slot.status}">
+              <div class="slot-label">${escapeHtml(slot.label)}</div>
+              <h3>${escapeHtml(slot.status.toUpperCase())}</h3>
+              <p class="subtle">${slot.status === 'completed'
+                ? 'Finished.'
+                : slot.status === 'active'
+                  ? 'Current mandatory session.'
+                  : slot.status === 'queued'
+                    ? 'Queued until you clear overdue work.'
+                    : 'Upcoming slot.'}</p>
+            </div>`
+          )
+          .join('')}
+      </div>
+    </article>
+  `;
+}
+
+function renderDashboardHistory(snapshotValue: AppSnapshot): string {
   const historyMax = Math.max(1, ...snapshotValue.history.map((entry) => entry.completed));
   return `
-    <section class="grid dashboard-grid">
-      <div class="grid">
-        <article class="card hero">
-          ${bannerMessage ? `<div class="status-banner">${escapeHtml(bannerMessage)}</div>` : ''}
-          <h2 class="card-title">Mandatory practice with the actual course calculus</h2>
-          <p>
-            Every two hours between 9 AM and 9 PM, CalcTrainer queues a deep-learning calculus session based on Lectures 4-6 and Assignment 5.
-            Sessions stay overdue until you complete the 10-minute minimum and finish the question set.
-          </p>
-          <div class="actions">
-            <button class="primary" data-action="open-practice" ${snapshotValue.activeSession ? '' : 'disabled'}>
-              ${snapshotValue.activeSession ? 'Open active session' : 'No active session yet'}
-            </button>
-            <button class="secondary" data-action="refresh-dashboard">Refresh state</button>
-          </div>
-        </article>
+    <article class="card" data-section="dashboard-history">
+      <h2 class="card-title">Seven-day history</h2>
+      <div class="history-row">
+        ${snapshotValue.history
+          .map((entry) => {
+            const fillHeight = `${Math.max(10, (entry.completed / historyMax) * 100)}%`;
+            return `
+              <div class="history-bar">
+                <div class="history-fill" style="height: ${fillHeight};"></div>
+                <div>
+                  <strong>${entry.completed}</strong>
+                  <div class="subtle">${escapeHtml(entry.dateKey.slice(5))}</div>
+                </div>
+              </div>`;
+          })
+          .join('')}
+      </div>
+    </article>
+  `;
+}
 
-        <article class="card">
-          <h2 class="card-title">Today's schedule</h2>
-          <div class="schedule-grid">
-            ${snapshotValue.schedule
+function renderDashboardPressure(snapshotValue: AppSnapshot): string {
+  return `
+    <article class="card" data-section="dashboard-pressure">
+      <h2 class="card-title">Current pressure</h2>
+      ${snapshotValue.overdueSummary
+        ? `<div class="status-banner" data-live="dashboard-overdue-summary">${escapeHtml(snapshotValue.overdueSummary)}</div>`
+        : '<p class="subtle">No session is active right now. The next slot will queue automatically.</p>'}
+      <div class="stat-row">
+        <div class="stat-box">
+          <span class="stat-label">Streak</span>
+          <span class="stat-value">${snapshotValue.streakDays}</span>
+        </div>
+        <div class="stat-box">
+          <span class="stat-label">Completed Today</span>
+          <span class="stat-value">${snapshotValue.completedToday}</span>
+        </div>
+        <div class="stat-box">
+          <span class="stat-label">Pending Queue</span>
+          <span class="stat-value">${snapshotValue.pendingCount}</span>
+        </div>
+      </div>
+    </article>
+  `;
+}
+
+function renderDashboardEnforcement(snapshotValue: AppSnapshot): string {
+  return `
+    <article class="card" data-section="dashboard-enforcement">
+      <h2 class="card-title">Enforcement style</h2>
+      <p class="subtle">${escapeHtml(enforcementDescription(snapshotValue.settings.enforcementStyle))}</p>
+      <div class="segmented-control">
+        <button
+          class="${snapshotValue.settings.enforcementStyle === 'strict' ? 'primary selected' : 'secondary'}"
+          data-action="set-enforcement-style"
+          data-style="strict"
+        >
+          Strict
+        </button>
+        <button
+          class="${snapshotValue.settings.enforcementStyle === 'lighter' ? 'primary selected' : 'secondary'}"
+          data-action="set-enforcement-style"
+          data-style="lighter"
+        >
+          Lighter
+        </button>
+      </div>
+      <div class="settings-row">
+        <label class="settings-field" for="lighter-reopen-delay-input">
+          <span class="stat-label">Lighter reopen delay</span>
+          <input
+            id="lighter-reopen-delay-input"
+            class="text-input settings-input"
+            type="number"
+            min="1"
+            max="30"
+            step="1"
+            inputmode="numeric"
+            value="${escapeHtml(getDraftLighterDelay())}"
+            data-setting-field="lighter-reopen-delay"
+          />
+        </label>
+        <button class="secondary" data-action="save-lighter-delay">Save delay</button>
+      </div>
+      <p class="small-copy">Used only in lighter mode. Range: 1 to 30 minutes before the practice window reopens.</p>
+      <p class="small-copy">This only changes reminder behavior. Sessions still remain mandatory until completed.</p>
+    </article>
+  `;
+}
+
+function renderDashboardWeakTopics(snapshotValue: AppSnapshot): string {
+  return `
+    <article class="card" data-section="dashboard-weak-topics">
+      <h2 class="card-title">Weak topics</h2>
+      ${snapshotValue.weakTopics.length > 0 && snapshotValue.weakTopics.some((topic) => topic.score > 0)
+        ? `
+          <div class="grid">
+            ${snapshotValue.weakTopics
               .map(
-                (slot) => `
-                <div class="slot-card ${slot.status}">
-                  <div class="slot-label">${escapeHtml(slot.label)}</div>
-                  <h3>${escapeHtml(slot.status.toUpperCase())}</h3>
-                  <p class="subtle">${slot.status === 'completed'
-                    ? 'Finished.'
-                    : slot.status === 'active'
-                      ? 'Current mandatory session.'
-                      : slot.status === 'queued'
-                        ? 'Queued until you clear overdue work.'
-                        : 'Upcoming slot.'}</p>
+                (topic) => `
+                <div class="stat-box">
+                  <span class="stat-label">${escapeHtml(topic.label)}</span>
+                  <span class="stat-value">${topic.score}</span>
                 </div>`
               )
               .join('')}
-          </div>
-        </article>
+          </div>`
+        : '<p class="subtle">No weak-topic signal yet. The app will learn once you start answering or self-rating derivations.</p>'}
+    </article>
+  `;
+}
 
-        <article class="card">
-          <h2 class="card-title">Seven-day history</h2>
-          <div class="history-row">
-            ${snapshotValue.history
-              .map((entry) => {
-                const fillHeight = `${Math.max(10, (entry.completed / historyMax) * 100)}%`;
-                return `
-                  <div class="history-bar">
-                    <div class="history-fill" style="height: ${fillHeight};"></div>
-                    <div>
-                      <strong>${entry.completed}</strong>
-                      <div class="subtle">${escapeHtml(entry.dateKey.slice(5))}</div>
-                    </div>
-                  </div>`;
-              })
-              .join('')}
-          </div>
-        </article>
+function renderDashboardCoverage(): string {
+  return `
+    <article class="card" data-section="dashboard-coverage">
+      <h2 class="card-title">Source coverage</h2>
+      <p class="subtle">Lecture 4: binary backprop and activation derivatives.</p>
+      <p class="subtle">Lecture 5: softmax cross-entropy, learning rate, and optimizer concepts.</p>
+      <p class="subtle">Lecture 6: convolution output size, padding, stride, pooling, and parameter counts.</p>
+      <p class="subtle">Assignment 5: full derivations for binary and multiclass backward passes.</p>
+    </article>
+  `;
+}
+
+function renderDashboard(snapshotValue: AppSnapshot): string {
+  return `
+    <section class="grid dashboard-grid" data-view="dashboard">
+      <div class="grid">
+        ${renderDashboardHero(snapshotValue)}
+        ${renderDashboardSchedule(snapshotValue)}
+        ${renderDashboardHistory(snapshotValue)}
       </div>
 
       <div class="grid">
-        <article class="card">
-          <h2 class="card-title">Current pressure</h2>
-          ${snapshotValue.overdueSummary
-            ? `<div class="status-banner" data-live="dashboard-overdue-summary">${escapeHtml(snapshotValue.overdueSummary)}</div>`
-            : '<p class="subtle">No session is active right now. The next slot will queue automatically.</p>'}
-          <div class="stat-row">
-            <div class="stat-box">
-              <span class="stat-label">Streak</span>
-              <span class="stat-value">${snapshotValue.streakDays}</span>
-            </div>
-            <div class="stat-box">
-              <span class="stat-label">Completed Today</span>
-              <span class="stat-value">${snapshotValue.completedToday}</span>
-            </div>
-            <div class="stat-box">
-              <span class="stat-label">Pending Queue</span>
-              <span class="stat-value">${snapshotValue.pendingCount}</span>
-            </div>
-          </div>
-        </article>
-
-        <article class="card">
-          <h2 class="card-title">Enforcement style</h2>
-          <p class="subtle">${escapeHtml(enforcementDescription(snapshotValue.settings.enforcementStyle))}</p>
-          <div class="segmented-control">
-            <button
-              class="${snapshotValue.settings.enforcementStyle === 'strict' ? 'primary selected' : 'secondary'}"
-              data-action="set-enforcement-style"
-              data-style="strict"
-            >
-              Strict
-            </button>
-            <button
-              class="${snapshotValue.settings.enforcementStyle === 'lighter' ? 'primary selected' : 'secondary'}"
-              data-action="set-enforcement-style"
-              data-style="lighter"
-            >
-              Lighter
-            </button>
-          </div>
-          <div class="settings-row">
-            <label class="settings-field" for="lighter-reopen-delay-input">
-              <span class="stat-label">Lighter reopen delay</span>
-              <input
-                id="lighter-reopen-delay-input"
-                class="text-input settings-input"
-                type="number"
-                min="1"
-                max="30"
-                step="1"
-                inputmode="numeric"
-                value="${escapeHtml(getDraftLighterDelay())}"
-                data-setting-field="lighter-reopen-delay"
-              />
-            </label>
-            <button class="secondary" data-action="save-lighter-delay">Save delay</button>
-          </div>
-          <p class="small-copy">Used only in lighter mode. Range: 1 to 30 minutes before the practice window reopens.</p>
-          <p class="small-copy">This only changes reminder behavior. Sessions still remain mandatory until completed.</p>
-        </article>
-
-        <article class="card">
-          <h2 class="card-title">Weak topics</h2>
-          ${snapshotValue.weakTopics.length > 0 && snapshotValue.weakTopics.some((topic) => topic.score > 0)
-            ? `
-              <div class="grid">
-                ${snapshotValue.weakTopics
-                  .map(
-                    (topic) => `
-                    <div class="stat-box">
-                      <span class="stat-label">${escapeHtml(topic.label)}</span>
-                      <span class="stat-value">${topic.score}</span>
-                    </div>`
-                  )
-                  .join('')}
-              </div>`
-            : '<p class="subtle">No weak-topic signal yet. The app will learn once you start answering or self-rating derivations.</p>'}
-        </article>
-
-        <article class="card">
-          <h2 class="card-title">Source coverage</h2>
-          <p class="subtle">Lecture 4: binary backprop and activation derivatives.</p>
-          <p class="subtle">Lecture 5: softmax cross-entropy, learning rate, and optimizer concepts.</p>
-          <p class="subtle">Lecture 6: convolution output size, padding, stride, pooling, and parameter counts.</p>
-          <p class="subtle">Assignment 5: full derivations for binary and multiclass backward passes.</p>
-        </article>
+        ${renderDashboardPressure(snapshotValue)}
+        ${renderDashboardEnforcement(snapshotValue)}
+        ${renderDashboardWeakTopics(snapshotValue)}
+        ${renderDashboardCoverage()}
       </div>
     </section>
   `;
@@ -661,7 +739,7 @@ function renderQuestionCard(question: Question): string {
   }
 
   return `
-    <article class="question-card">
+    <article class="question-card" data-question-card="${question.id}">
       <div class="question-top">
         <div>
           <h3 class="question-title">${escapeHtml(question.title)}</h3>
@@ -680,55 +758,146 @@ function renderQuestionCard(question: Question): string {
   `;
 }
 
-function renderPractice(snapshotValue: AppSnapshot): string {
+function renderPracticeHero(snapshotValue: AppSnapshot): string {
   const session = snapshotValue.activeSession;
   if (!session) {
-    return `
-      <section class="empty-state">
-        <h2 class="title-serif">No active session</h2>
-        <p class="subtle">This window will reopen automatically when the next practice slot becomes due.</p>
-        <div class="actions" style="justify-content: center;">
-          <button class="primary" data-action="open-dashboard">Open dashboard</button>
-        </div>
-      </section>
-    `;
+    return '';
   }
 
   const status = localStatus(session);
   return `
-    <section class="grid">
-      <article class="card hero">
-        ${bannerMessage ? `<div class="status-banner">${escapeHtml(bannerMessage)}</div>` : ''}
-        <h2 class="card-title">Mandatory session for ${escapeHtml(formatDate(session.scheduledFor))}</h2>
-        <p>
-          Finish all ${status.totalQuestions} questions and stay in the session for at least 10 minutes.
-          If you close this window, CalcTrainer will reopen it until the session is complete.
-        </p>
-        <p class="subtle">For typed calculus questions, use <strong>Completed by paper</strong> if you want to work the solution by hand and then self-check it.</p>
-        <div class="practice-meta">
-          <div class="meta-box">
-            <span class="stat-label">Answered</span>
-            <span class="stat-value" data-live="answered-count">${status.answeredCount}/${status.totalQuestions}</span>
-          </div>
-          <div class="meta-box">
-            <span class="stat-label">Minimum Timer</span>
-            <span class="stat-value" data-live="minimum-timer">${status.minDurationMet ? 'Done' : formatDuration(status.remainingMs)}</span>
-          </div>
-          <div class="meta-box">
-            <span class="stat-label">Completion Gate</span>
-            <span class="stat-value" data-live="completion-gate">${status.canComplete ? 'Unlocked' : 'Locked'}</span>
-          </div>
+    <article class="card hero" data-section="practice-hero">
+      <div data-live="banner-region">${renderBanner()}</div>
+      <h2 class="card-title">Mandatory session for ${escapeHtml(formatDate(session.scheduledFor, snapshotValue.settings.timezone))}</h2>
+      <p>
+        Finish all ${status.totalQuestions} questions and stay in the session for at least 10 minutes.
+        If you close this window, CalcTrainer will reopen it until the session is complete.
+      </p>
+      <p class="subtle">For typed calculus questions, use <strong>Completed by paper</strong> if you want to work the solution by hand and then self-check it.</p>
+      <div class="practice-meta">
+        <div class="meta-box">
+          <span class="stat-label">Answered</span>
+          <span class="stat-value" data-live="answered-count">${status.answeredCount}/${status.totalQuestions}</span>
         </div>
-        <div class="actions">
-          <button class="primary" data-action="complete-session" ${status.canComplete ? '' : 'disabled'}>Complete session</button>
-          <button class="secondary" data-action="open-dashboard">Dashboard</button>
+        <div class="meta-box">
+          <span class="stat-label">Minimum Timer</span>
+          <span class="stat-value" data-live="minimum-timer">${status.minDurationMet ? 'Done' : formatDuration(status.remainingMs)}</span>
         </div>
-      </article>
-      <div class="question-list">
+        <div class="meta-box">
+          <span class="stat-label">Completion Gate</span>
+          <span class="stat-value" data-live="completion-gate">${status.canComplete ? 'Unlocked' : 'Locked'}</span>
+        </div>
+      </div>
+      <div class="actions">
+        <button class="primary" data-action="complete-session" ${status.canComplete ? '' : 'disabled'}>Complete session</button>
+        <button class="secondary" data-action="open-dashboard">Dashboard</button>
+      </div>
+    </article>
+  `;
+}
+
+function renderPracticeEmptyState(): string {
+  return `
+    <section class="empty-state" data-view="practice-empty">
+      <h2 class="title-serif">No active session</h2>
+      <p class="subtle">This window will reopen automatically when the next practice slot becomes due.</p>
+      <div class="actions" style="justify-content: center;">
+        <button class="primary" data-action="open-dashboard">Open dashboard</button>
+      </div>
+    </section>
+  `;
+}
+
+function renderPractice(snapshotValue: AppSnapshot): string {
+  const session = snapshotValue.activeSession;
+  if (!session) {
+    return renderPracticeEmptyState();
+  }
+
+  return `
+    <section class="grid" data-view="practice" data-session-id="${escapeHtml(session.id)}">
+      ${renderPracticeHero(snapshotValue)}
+      <div class="question-list" data-section="practice-questions">
         ${session.questions.map((question) => renderQuestionCard(question)).join('')}
       </div>
     </section>
   `;
+}
+
+function updateDashboardView(previousSnapshot: AppSnapshot, nextSnapshot: AppSnapshot): void {
+  if (!appElement?.querySelector('[data-view="dashboard"]')) {
+    appElement!.innerHTML = renderDashboard(nextSnapshot);
+    return;
+  }
+
+  updateBannerRegions();
+
+  if (previousSnapshot.activeSession?.id !== nextSnapshot.activeSession?.id) {
+    replaceSection('dashboard-hero', renderDashboardHero(nextSnapshot));
+  }
+  if (JSON.stringify(previousSnapshot.schedule) !== JSON.stringify(nextSnapshot.schedule)) {
+    replaceSection('dashboard-schedule', renderDashboardSchedule(nextSnapshot));
+  }
+  if (JSON.stringify(previousSnapshot.history) !== JSON.stringify(nextSnapshot.history)) {
+    replaceSection('dashboard-history', renderDashboardHistory(nextSnapshot));
+  }
+  if (
+    previousSnapshot.overdueSummary !== nextSnapshot.overdueSummary
+    || previousSnapshot.streakDays !== nextSnapshot.streakDays
+    || previousSnapshot.completedToday !== nextSnapshot.completedToday
+    || previousSnapshot.pendingCount !== nextSnapshot.pendingCount
+  ) {
+    replaceSection('dashboard-pressure', renderDashboardPressure(nextSnapshot));
+  }
+  if (
+    previousSnapshot.settings.enforcementStyle !== nextSnapshot.settings.enforcementStyle
+    || previousSnapshot.settings.lighterReopenDelayMinutes !== nextSnapshot.settings.lighterReopenDelayMinutes
+  ) {
+    replaceSection('dashboard-enforcement', renderDashboardEnforcement(nextSnapshot));
+  }
+  if (JSON.stringify(previousSnapshot.weakTopics) !== JSON.stringify(nextSnapshot.weakTopics)) {
+    replaceSection('dashboard-weak-topics', renderDashboardWeakTopics(nextSnapshot));
+  }
+}
+
+function updatePracticeQuestionCards(previousSnapshot: AppSnapshot, nextSnapshot: AppSnapshot): void {
+  const previousSession = previousSnapshot.activeSession;
+  const nextSession = nextSnapshot.activeSession;
+  if (!previousSession || !nextSession || previousSession.id !== nextSession.id) {
+    return;
+  }
+
+  for (const question of nextSession.questions) {
+    const previousProgress = previousSession.responses[question.id] ?? {};
+    const nextProgress = nextSession.responses[question.id] ?? {};
+    const shouldReplace = JSON.stringify(previousProgress) !== JSON.stringify(nextProgress);
+
+    if (!shouldReplace) {
+      continue;
+    }
+
+    const currentCard = appElement?.querySelector<HTMLElement>(`[data-question-card="${question.id}"]`);
+    if (!currentCard) {
+      continue;
+    }
+
+    currentCard.replaceWith(createElementFromHtml<HTMLElement>(renderQuestionCard(question)));
+  }
+}
+
+function updatePracticeView(previousSnapshot: AppSnapshot, nextSnapshot: AppSnapshot): void {
+  const existingView = appElement?.querySelector<HTMLElement>('[data-view="practice"]');
+  const previousSessionId = previousSnapshot.activeSession?.id;
+  const nextSessionId = nextSnapshot.activeSession?.id;
+
+  if (!existingView || previousSessionId !== nextSessionId || !nextSessionId) {
+    appElement!.innerHTML = renderPractice(nextSnapshot);
+    return;
+  }
+
+  updateBannerRegions();
+  updatePracticeQuestionCards(previousSnapshot, nextSnapshot);
+  updatePracticeLiveState();
 }
 
 function updatePracticeLiveState(): void {
@@ -778,7 +947,20 @@ function render(): void {
     appElement.innerHTML = '<section class="empty-state"><p class="subtle">Loading application state...</p></section>';
     return;
   }
-  appElement.innerHTML = mode === 'practice' ? renderPractice(snapshot) : renderDashboard(snapshot);
+
+  const previousSnapshot = renderedSnapshot;
+  if (!previousSnapshot) {
+    appElement.innerHTML = mode === 'practice' ? renderPractice(snapshot) : renderDashboard(snapshot);
+    renderedSnapshot = snapshot;
+    return;
+  }
+
+  if (mode === 'practice') {
+    updatePracticeView(previousSnapshot, snapshot);
+  } else {
+    updateDashboardView(previousSnapshot, snapshot);
+  }
+  renderedSnapshot = snapshot;
 }
 
 function tickView(): void {
@@ -857,7 +1039,7 @@ appElement?.addEventListener('click', async (event) => {
     if (!enforcementStyle || snapshot.settings.enforcementStyle === enforcementStyle) {
       return;
     }
-    snapshot = await window.calcTrainer.updateSettings({ enforcementStyle }) as AppSnapshot;
+    applySnapshot(await window.calcTrainer.updateSettings({ enforcementStyle }) as AppSnapshot);
     setBanner(`Enforcement style set to ${enforcementStyle}.`);
     return;
   }
@@ -869,7 +1051,7 @@ appElement?.addEventListener('click', async (event) => {
       setBanner('Enter a numeric lighter reopen delay between 1 and 30 minutes.');
       return;
     }
-    snapshot = await window.calcTrainer.updateSettings({ lighterReopenDelayMinutes }) as AppSnapshot;
+    applySnapshot(await window.calcTrainer.updateSettings({ lighterReopenDelayMinutes }) as AppSnapshot);
     setBanner(`Lighter reopen delay set to ${snapshot.settings.lighterReopenDelayMinutes} minute${snapshot.settings.lighterReopenDelayMinutes === 1 ? '' : 's'}.`);
     return;
   }
@@ -882,7 +1064,7 @@ appElement?.addEventListener('click', async (event) => {
     const result = await window.calcTrainer.completeSession({
       sessionId: snapshot.activeSession.id
     }) as { ok: boolean; reason?: string; snapshot: AppSnapshot };
-    snapshot = result.snapshot;
+    applySnapshot(result.snapshot);
     setBanner(result.ok ? 'Session completed.' : (result.reason ?? 'Session cannot be completed yet.'));
     return;
   }

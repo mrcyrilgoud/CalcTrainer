@@ -83,4 +83,34 @@ describe('practice session completion', () => {
     expect(status.answeredCount).toBe(1);
     expect(workingState.weakTopicScores[paperQuestion.topicTag]).toBe(2);
   });
+
+  it('only replaces the active session branch when submitting an answer', () => {
+    const seeded = queueDueSessions(createDefaultState(makeDate(8, 30)), makeDate(11, 5)).state;
+    const activeSession = seeded.sessions.find((session) => session.id === seeded.activeSessionId);
+    const queuedSession = seeded.sessions.find((session) => session.status === 'pending');
+
+    expect(activeSession).toBeDefined();
+    expect(queuedSession).toBeDefined();
+    if (!activeSession || !queuedSession) {
+      return;
+    }
+
+    const answerableQuestion = activeSession.questions.find((question) => question.promptType !== 'derivation');
+    expect(answerableQuestion).toBeDefined();
+    if (!answerableQuestion) {
+      return;
+    }
+
+    const result = submitAnswer(
+      seeded,
+      activeSession.id,
+      answerableQuestion.id,
+      correctAnswerText(answerableQuestion),
+      makeDate(11, 6)
+    );
+
+    expect(result.state).not.toBe(seeded);
+    expect(result.state.settings).toBe(seeded.settings);
+    expect(result.state.sessions.find((session) => session.id === queuedSession.id)).toBe(queuedSession);
+  });
 });

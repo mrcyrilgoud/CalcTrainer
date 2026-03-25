@@ -7,27 +7,8 @@ import {
   PracticeSession,
   Question,
   QuestionProgress,
-  SelfCheckRating,
-  TopicTag
+  SelfCheckRating
 } from './types';
-
-function cloneState(state: AppState): AppState {
-  return {
-    ...state,
-    settings: {
-      ...state.settings,
-      activeHours: { ...state.settings.activeHours }
-    },
-    sessions: state.sessions.map((session) => ({
-      ...session,
-      questions: session.questions.map((question) => ({ ...question })),
-      responses: Object.fromEntries(
-        Object.entries(session.responses).map(([questionId, progress]) => [questionId, { ...progress }])
-      )
-    })),
-    weakTopicScores: { ...state.weakTopicScores }
-  };
-}
 
 function normalizeStructuredAnswer(input: string): string {
   return input
@@ -66,20 +47,21 @@ function getProgressWeakSignal(progress: QuestionProgress): number {
   return 0;
 }
 
-function adjustWeakTopicScore(
-  scores: Record<TopicTag, number>,
-  topicTag: TopicTag,
-  previousSignal: number,
-  nextSignal: number
-): Record<TopicTag, number> {
-  return {
-    ...scores,
-    [topicTag]: Math.max(0, (scores[topicTag] ?? 0) - previousSignal + nextSignal)
-  };
-}
-
 function getQuestionProgress(session: PracticeSession, questionId: string): QuestionProgress {
   return session.responses[questionId] ?? {};
+}
+
+function findSessionIndex(state: AppState, sessionId: string): number {
+  return state.sessions.findIndex((session) => session.id === sessionId);
+}
+
+function replaceSession(state: AppState, sessionIndex: number, session: PracticeSession): AppState {
+  const nextSessions = state.sessions.slice();
+  nextSessions[sessionIndex] = session;
+  return {
+    ...state,
+    sessions: nextSessions
+  };
 }
 
 export function findSession(state: AppState, sessionId: string): PracticeSession | undefined {
@@ -113,38 +95,67 @@ export function activateNextPendingSession(
   state: AppState,
   now: Date
 ): { state: AppState; activatedSessionId?: string } {
-  const workingState = cloneState(state);
-  const alreadyActive = getActiveSession(workingState);
+  const alreadyActive = getActiveSession(state);
   if (alreadyActive) {
-    return { state: workingState };
+    return { state };
   }
 
-  const pendingSession = [...workingState.sessions]
-    .filter((session) => session.status === 'pending')
-    .sort((left, right) => left.scheduledFor.localeCompare(right.scheduledFor))[0];
+  let pendingSessionIndex = -1;
+  let pendingSession: PracticeSession | undefined;
+  for (let index = 0; index < state.sessions.length; index += 1) {
+    const session = state.sessions[index];
+    if (session?.status !== 'pending') {
+      continue;
+    }
+
+    if (!pendingSession || session.scheduledFor < pendingSession.scheduledFor) {
+      pendingSession = session;
+      pendingSessionIndex = index;
+    }
+  }
 
   if (!pendingSession) {
-    workingState.activeSessionId = undefined;
-    return { state: workingState };
+    if (!state.activeSessionId) {
+      return { state };
+    }
+    return {
+      state: {
+        ...state,
+        activeSessionId: undefined
+      }
+    };
   }
 
-  pendingSession.status = 'active';
-  pendingSession.startedAt = pendingSession.startedAt ?? now.toISOString();
-  workingState.activeSessionId = pendingSession.id;
+  const updatedSession: PracticeSession = {
+    ...pendingSession,
+    status: 'active',
+    startedAt: pendingSession.startedAt ?? now.toISOString()
+  };
+  const nextState = {
+    ...replaceSession(state, pendingSessionIndex, updatedSession),
+    activeSessionId: pendingSession.id
+  };
   return {
-    state: workingState,
+    state: nextState,
     activatedSessionId: pendingSession.id
   };
 }
 
 export function markSessionPrompted(state: AppState, sessionId: string, now: Date): AppState {
-  const workingState = cloneState(state);
-  const session = findSession(workingState, sessionId);
-  if (!session) {
-    return workingState;
+  const sessionIndex = findSessionIndex(state, sessionId);
+  if (sessionIndex < 0) {
+    return state;
   }
-  session.lastPromptedAt = now.toISOString();
-  return workingState;
+
+  const session = state.sessions[sessionIndex];
+  if (!session) {
+    return state;
+  }
+
+  return replaceSession(state, sessionIndex, {
+    ...session,
+    lastPromptedAt: now.toISOString()
+  });
 }
 
 export function evaluateAnswer(question: Question, answerText: string, submittedAt: Date): AttemptEvaluation {
@@ -210,36 +221,52 @@ export function submitAnswer(
   answerText: string,
   now: Date
 ): { state: AppState; evaluation?: AttemptEvaluation } {
-  const workingState = cloneState(state);
-  const session = findSession(workingState, sessionId);
-  if (!session) {
-    return { state: workingState };
+  const sessionIndex = findSessionIndex(state, sessionId);
+  if (sessionIndex < 0) {
+    return { state };
   }
 
+  const session = state.sessions[sessionIndex];
+  if (!session) {
+    return { state };
+  }
   const question = session.questions.find((candidate) => candidate.id === questionId);
   if (!question || question.promptType === 'derivation') {
-    return { state: workingState };
+    return { state };
   }
 
   const previousProgress = getQuestionProgress(session, questionId);
   const evaluation = evaluateAnswer(question, answerText, now);
   const previousSignal = getProgressWeakSignal(previousProgress);
+  const nextSignal = evaluation.weakTopicSignal;
+  const nextScore = Math.max(0, (state.weakTopicScores[question.topicTag] ?? 0) - previousSignal + nextSignal);
 
-  session.responses[questionId] = {
-    ...previousProgress,
-    answerText,
-    evaluation,
-    selfCheck: undefined
+  const updatedSession: PracticeSession = {
+    ...session,
+    responses: {
+      ...session.responses,
+      [questionId]: {
+        ...previousProgress,
+        answerText,
+        evaluation,
+        selfCheck: undefined
+      }
+    }
   };
-  workingState.weakTopicScores = adjustWeakTopicScore(
-    workingState.weakTopicScores,
-    question.topicTag,
-    previousSignal,
-    evaluation.weakTopicSignal
-  );
+
+  const nextStateBase = replaceSession(state, sessionIndex, updatedSession);
+  const nextState = nextScore === (state.weakTopicScores[question.topicTag] ?? 0)
+    ? nextStateBase
+    : {
+        ...nextStateBase,
+        weakTopicScores: {
+          ...state.weakTopicScores,
+          [question.topicTag]: nextScore
+        }
+      };
 
   return {
-    state: workingState,
+    state: nextState,
     evaluation
   };
 }
@@ -250,23 +277,31 @@ export function revealWorkedSolution(
   questionId: string,
   now: Date
 ): AppState {
-  const workingState = cloneState(state);
-  const session = findSession(workingState, sessionId);
-  if (!session) {
-    return workingState;
+  const sessionIndex = findSessionIndex(state, sessionId);
+  if (sessionIndex < 0) {
+    return state;
   }
 
+  const session = state.sessions[sessionIndex];
+  if (!session) {
+    return state;
+  }
   const question = session.questions.find((candidate) => candidate.id === questionId);
   if (!question) {
-    return workingState;
+    return state;
   }
 
   const previousProgress = getQuestionProgress(session, questionId);
-  session.responses[questionId] = {
-    ...previousProgress,
-    revealedSolutionAt: now.toISOString()
-  };
-  return workingState;
+  return replaceSession(state, sessionIndex, {
+    ...session,
+    responses: {
+      ...session.responses,
+      [questionId]: {
+        ...previousProgress,
+        revealedSolutionAt: now.toISOString()
+      }
+    }
+  });
 }
 
 export function recordSelfCheck(
@@ -275,36 +310,53 @@ export function recordSelfCheck(
   questionId: string,
   rating: SelfCheckRating
 ): AppState {
-  const workingState = cloneState(state);
-  const session = findSession(workingState, sessionId);
-  if (!session) {
-    return workingState;
+  const sessionIndex = findSessionIndex(state, sessionId);
+  if (sessionIndex < 0) {
+    return state;
   }
 
+  const session = state.sessions[sessionIndex];
+  if (!session) {
+    return state;
+  }
   const question = session.questions.find((candidate) => candidate.id === questionId);
   if (!question) {
-    return workingState;
+    return state;
   }
 
   const previousProgress = getQuestionProgress(session, questionId);
   if (!previousProgress.revealedSolutionAt) {
-    return workingState;
+    return state;
+  }
+
+  if (previousProgress.selfCheck === rating) {
+    return state;
   }
 
   const previousSignal = getProgressWeakSignal(previousProgress);
   const nextSignal = weakSignalFromSelfCheck(rating);
+  const nextScore = Math.max(0, (state.weakTopicScores[question.topicTag] ?? 0) - previousSignal + nextSignal);
 
-  session.responses[questionId] = {
-    ...previousProgress,
-    selfCheck: rating
+  const updatedSession: PracticeSession = {
+    ...session,
+    responses: {
+      ...session.responses,
+      [questionId]: {
+        ...previousProgress,
+        selfCheck: rating
+      }
+    }
   };
-  workingState.weakTopicScores = adjustWeakTopicScore(
-    workingState.weakTopicScores,
-    question.topicTag,
-    previousSignal,
-    nextSignal
-  );
-  return workingState;
+  const nextStateBase = replaceSession(state, sessionIndex, updatedSession);
+  return nextScore === (state.weakTopicScores[question.topicTag] ?? 0)
+    ? nextStateBase
+    : {
+        ...nextStateBase,
+        weakTopicScores: {
+          ...state.weakTopicScores,
+          [question.topicTag]: nextScore
+        }
+      };
 }
 
 export function isQuestionComplete(session: PracticeSession, questionId: string): boolean {
@@ -338,11 +390,19 @@ export function completeSession(
   sessionId: string,
   now: Date
 ): { state: AppState; completed: boolean; reason?: string; activatedSessionId?: string } {
-  const workingState = cloneState(state);
-  const session = findSession(workingState, sessionId);
+  const sessionIndex = findSessionIndex(state, sessionId);
+  if (sessionIndex < 0) {
+    return {
+      state,
+      completed: false,
+      reason: 'Session not found.'
+    };
+  }
+
+  const session = state.sessions[sessionIndex];
   if (!session) {
     return {
-      state: workingState,
+      state,
       completed: false,
       reason: 'Session not found.'
     };
@@ -351,7 +411,7 @@ export function completeSession(
   const status = getActiveSessionStatus(session, now);
   if (!status.canComplete) {
     return {
-      state: workingState,
+      state,
       completed: false,
       reason: status.minDurationMet
         ? 'Finish every question before ending the session.'
@@ -359,13 +419,19 @@ export function completeSession(
     };
   }
 
-  session.status = 'completed';
-  session.completedAt = now.toISOString();
-  if (workingState.activeSessionId === sessionId) {
-    workingState.activeSessionId = undefined;
-  }
+  const nextState = replaceSession(state, sessionIndex, {
+    ...session,
+    status: 'completed',
+    completedAt: now.toISOString()
+  });
+  const completedState = nextState.activeSessionId === sessionId
+    ? {
+        ...nextState,
+        activeSessionId: undefined
+      }
+    : nextState;
 
-  const activation = activateNextPendingSession(workingState, now);
+  const activation = activateNextPendingSession(completedState, now);
   return {
     state: activation.state,
     completed: true,

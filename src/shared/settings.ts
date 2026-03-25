@@ -13,6 +13,20 @@ export function resolveLocalTimezone(): string {
   return Intl.DateTimeFormat().resolvedOptions().timeZone || 'America/Los_Angeles';
 }
 
+export function normalizeTimezone(value: unknown): string {
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    return resolveLocalTimezone();
+  }
+
+  try {
+    return new Intl.DateTimeFormat('en-US', {
+      timeZone: value
+    }).resolvedOptions().timeZone;
+  } catch {
+    return resolveLocalTimezone();
+  }
+}
+
 export function createDefaultSettings(): AppSettings {
   return {
     timezone: resolveLocalTimezone(),
@@ -41,6 +55,7 @@ export function normalizeLighterReopenDelayMinutes(value: unknown): number {
 export function sanitizeSettings(settings: AppSettings): AppSettings {
   return {
     ...settings,
+    timezone: normalizeTimezone(settings.timezone),
     lighterReopenDelayMinutes: normalizeLighterReopenDelayMinutes(settings.lighterReopenDelayMinutes)
   };
 }

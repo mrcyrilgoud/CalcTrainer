@@ -1,7 +1,7 @@
 import { getActiveSession, getActiveSessionStatus } from './practice';
 import { getPendingSessionCount, getTodayScheduleView } from './schedule';
 import { AppSnapshot, AppState, HistoryPoint, TopicScore, TopicTag } from './types';
-import { formatDateLabel, formatDuration, formatTimeLabel, parseSlotId, toDateKey } from './time';
+import { buildLocalDate, formatDateLabel, formatDuration, formatTimeLabel, parseSlotId, toDateKey } from './time';
 
 const TOPIC_LABELS: Record<TopicTag, string> = {
   binary_bce_backprop: 'Binary BCE backprop',
@@ -15,12 +15,15 @@ const TOPIC_LABELS: Record<TopicTag, string> = {
 
 function buildHistory(state: AppState, now: Date): HistoryPoint[] {
   const days: HistoryPoint[] = [];
+  const anchorDate = buildLocalDate(toDateKey(now, state.settings.timezone), 12, 0, state.settings.timezone);
   for (let offset = 6; offset >= 0; offset -= 1) {
-    const day = new Date(now);
-    day.setDate(now.getDate() - offset);
-    const dateKey = toDateKey(day);
+    const day = new Date(anchorDate);
+    day.setUTCDate(anchorDate.getUTCDate() - offset);
+    const dateKey = toDateKey(day, state.settings.timezone);
     const completed = state.sessions.filter(
-      (session) => session.status === 'completed' && toDateKey(new Date(session.completedAt ?? session.scheduledFor)) === dateKey
+      (session) =>
+        session.status === 'completed'
+        && toDateKey(new Date(session.completedAt ?? session.scheduledFor), state.settings.timezone) === dateKey
     ).length;
     days.push({ dateKey, completed });
   }
@@ -61,8 +64,8 @@ export function buildSnapshot(state: AppState, now: Date): AppSnapshot {
 
   let overdueSummary: string | null = null;
   if (activeSession) {
-    const slotDate = parseSlotId(activeSession.slotId);
-    overdueSummary = `Active session from ${formatDateLabel(slotDate)} at ${formatTimeLabel(slotDate)}. ${activeSessionStatus?.canComplete ? 'You can finish it now.' : `Minimum timer remaining: ${formatDuration(activeSessionStatus?.remainingMs ?? 0)}.`}`;
+    const slotDate = parseSlotId(activeSession.slotId, state.settings.timezone);
+    overdueSummary = `Active session from ${formatDateLabel(slotDate, state.settings.timezone)} at ${formatTimeLabel(slotDate, state.settings.timezone)}. ${activeSessionStatus?.canComplete ? 'You can finish it now.' : `Minimum timer remaining: ${formatDuration(activeSessionStatus?.remainingMs ?? 0)}.`}`;
   }
 
   return {
