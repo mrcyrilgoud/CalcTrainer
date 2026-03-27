@@ -1,9 +1,20 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
 import { describe, expect, it } from 'vitest';
 
 import { completeSession, recordSelfCheck, revealWorkedSolution, submitAnswer } from '../src/shared/practice';
 import { buildSnapshot } from '../src/shared/selectors';
 import { queueDueSessions } from '../src/shared/schedule';
-import { createDefaultState, hydrateState, serializeState } from '../src/shared/storage';
+import {
+  COMPLETED_SESSION_RETENTION_MS,
+  createDefaultState,
+  hydrateState,
+  loadStateFile,
+  saveStateFile,
+  serializeState
+} from '../src/shared/storage';
 import { PracticeSession, Question } from '../src/shared/types';
 
 function makeDate(hour: number, minute = 0): Date {
@@ -130,5 +141,115 @@ describe('end-to-end practice flow', () => {
     const typedSnapshot = buildSnapshot(typedState, makeDate(9, 7));
     expect(typedSnapshot.activeSessionStatus?.answeredCount).toBe(1);
     expect(typedState.weakTopicScores[paperQuestion.topicTag]).toBe(0);
+  });
+
+  it('completes the first active session and then the next queued session in one continuous flow', () => {
+    const queuedState = queueDueSessions(createDefaultState(makeDate(8, 30)), makeDate(13, 5)).state;
+    const first = queuedState.sessions.find((session) => session.id === queuedState.activeSessionId);
+    expect(first).toBeDefined();
+    if (!first) {
+      return;
+    }
+
+    const paperQuestion = first.questions.find((question) => question.promptType !== 'derivation');
+    expect(paperQuestion).toBeDefined();
+    if (!paperQuestion) {
+      return;
+    }
+
+    const afterFirst = completeSession(
+      answerSessionWithMixedPaperAndTyping(queuedState, first, paperQuestion.id, makeDate(13, 7)),
+      first.id,
+      makeDate(13, 20)
+    ).state;
+
+    const second = afterFirst.sessions.find((session) => session.id === afterFirst.activeSessionId);
+    expect(second?.id).toBe('2026-03-23T11:00');
+    if (!second) {
+      return;
+    }
+
+    const paper2 = second.questions.find((question) => question.promptType !== 'derivation');
+    expect(paper2).toBeDefined();
+    if (!paper2) {
+      return;
+    }
+
+    const answeredSecond = answerSessionWithMixedPaperAndTyping(afterFirst, second, paper2.id, makeDate(13, 22));
+    const completion2 = completeSession(answeredSecond, second.id, makeDate(13, 35));
+
+    expect(completion2.completed).toBe(true);
+    expect(completion2.state.sessions.find((s) => s.id === second.id)?.status).toBe('completed');
+
+    const snapshot = buildSnapshot(completion2.state, makeDate(13, 35));
+    expect(snapshot.completedToday).toBe(2);
+    expect(snapshot.schedule.filter((slot) => slot.status === 'completed').length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('saveStateFile plus loadStateFile preserves an in-progress session and prunes stale completed rows', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'calctrainer-e2e-'));
+    const filePath = path.join(tempDir, 'calc-trainer-state.json');
+    const now = new Date('2026-03-20T12:00:00.000Z');
+
+    let state = queueDueSessions(createDefaultState(now), now).state;
+    const active = state.sessions.find((session) => session.id === state.activeSessionId);
+    expect(active).toBeDefined();
+    if (!active) {
+      return;
+    }
+
+    const paper = active.questions.find((question) => question.promptType !== 'derivation');
+    expect(paper).toBeDefined();
+    if (!paper) {
+      return;
+    }
+
+    state = answerSessionWithMixedPaperAndTyping(state, active, paper.id, now);
+    state = completeSession(state, active.id, new Date(now.getTime() + 15 * 60_000)).state;
+
+    const ancientCompletedAt = new Date(now.getTime() - COMPLETED_SESSION_RETENTION_MS - 48 * 60 * 60 * 1000).toISOString();
+    state = {
+      ...state,
+      sessions: [
+        ...state.sessions,
+        {
+          id: 'stale-slot',
+          slotId: '2026-02-01T09:00',
+          scheduledFor: '2026-02-01T17:00:00.000Z',
+          status: 'completed' as const,
+          completedAt: ancientCompletedAt,
+          minDurationMs: 600_000,
+          targetDurationMs: 900_000,
+          questions: [],
+          responses: {}
+        }
+      ]
+    };
+
+    saveStateFile(filePath, state);
+    const loaded = loadStateFile(filePath);
+
+    expect(loaded.sessions.some((session) => session.id === 'stale-slot')).toBe(false);
+    const reloadedActive = loaded.sessions.find((session) => session.id === loaded.activeSessionId);
+    expect(reloadedActive?.status).toBe('active');
+    expect(reloadedActive?.questions.length).toBeGreaterThan(0);
+
+    const snap = buildSnapshot(loaded, now);
+    expect(snap.pendingCount).toBeGreaterThan(0);
+  });
+
+  it('slim snapshot matches full snapshot except active session question payload', () => {
+    const queuedState = queueDueSessions(createDefaultState(makeDate(8, 30)), makeDate(13, 5)).state;
+    const now = makeDate(13, 5);
+    const full = buildSnapshot(queuedState, now, 'full');
+    const slim = buildSnapshot(queuedState, now, 'slim');
+
+    expect(full.activeSession?.questions.length).toBeGreaterThan(0);
+    expect(slim.activeSession?.questions).toEqual([]);
+    expect(slim.activeSession?.responses).toEqual({});
+    expect(slim.activeSessionStatus).toEqual(full.activeSessionStatus);
+    expect(slim.schedule).toEqual(full.schedule);
+    expect(slim.history).toEqual(full.history);
+    expect(slim.settings).toEqual(full.settings);
   });
 });
