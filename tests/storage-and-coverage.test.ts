@@ -12,7 +12,15 @@ import {
 } from '../src/shared/settings';
 import { getQuestionBankCoverage } from '../src/shared/questions';
 import { buildSnapshot } from '../src/shared/selectors';
-import { createDefaultState, hydrateState, loadStateFile, saveStateFile, serializeState } from '../src/shared/storage';
+import {
+  COMPLETED_SESSION_RETENTION_MS,
+  createDefaultState,
+  hydrateState,
+  loadStateFile,
+  pruneStateForPersistence,
+  saveStateFile,
+  serializeState
+} from '../src/shared/storage';
 import { queueDueSessions } from '../src/shared/schedule';
 import { TOPIC_TAGS } from '../src/shared/types';
 
@@ -112,5 +120,56 @@ describe('storage and question coverage', () => {
     expect(snapshot.history[snapshot.history.length - 2]?.dateKey).toBe('2026-03-08');
     expect(snapshot.history[snapshot.history.length - 2]?.completed).toBe(1);
     expect(snapshot.history[snapshot.history.length - 1]?.dateKey).toBe('2026-03-09');
+  });
+
+  it('prunes completed sessions older than the retention window and strips question payloads from kept completed sessions', () => {
+    const now = new Date('2026-03-20T12:00:00.000Z');
+    const oldCompletedAt = new Date(now.getTime() - COMPLETED_SESSION_RETENTION_MS - 24 * 60 * 60 * 1000).toISOString();
+    const recentCompletedAt = new Date(now.getTime() - 2 * 24 * 60 * 60 * 1000).toISOString();
+
+    const state = createDefaultState(now);
+    state.sessions = [
+      {
+        id: 'old-done',
+        slotId: '2026-03-01T09:00',
+        scheduledFor: '2026-03-01T16:00:00.000Z',
+        status: 'completed',
+        completedAt: oldCompletedAt,
+        minDurationMs: 600_000,
+        targetDurationMs: 900_000,
+        questions: [{ id: 'q', templateId: 't', title: 't', source: 's', topicTag: 'conv_output_size', difficulty: 'medium', promptType: 'numeric', stem: 'x', workedSolution: 'y', answerSchema: { kind: 'numeric', correctValue: 1, tolerance: 0 } }],
+        responses: { q: {} }
+      },
+      {
+        id: 'recent-done',
+        slotId: '2026-03-18T09:00',
+        scheduledFor: '2026-03-18T16:00:00.000Z',
+        status: 'completed',
+        completedAt: recentCompletedAt,
+        minDurationMs: 600_000,
+        targetDurationMs: 900_000,
+        questions: [{ id: 'q2', templateId: 't2', title: 't', source: 's', topicTag: 'conv_output_size', difficulty: 'medium', promptType: 'numeric', stem: 'x', workedSolution: 'y', answerSchema: { kind: 'numeric', correctValue: 1, tolerance: 0 } }],
+        responses: { q2: { answerText: '1' } }
+      }
+    ];
+
+    const { next, changed } = pruneStateForPersistence(state, now);
+    expect(changed).toBe(true);
+    expect(next.sessions).toHaveLength(1);
+    expect(next.sessions[0]?.id).toBe('recent-done');
+    expect(next.sessions[0]?.questions).toEqual([]);
+    expect(next.sessions[0]?.responses).toEqual({});
+  });
+
+  it('buildSnapshot slim mode omits active session questions while preserving status fields', () => {
+    const dueState = queueDueSessions(createDefaultState(new Date(2026, 2, 23, 8, 0)), new Date(2026, 2, 23, 11, 1)).state;
+    const full = buildSnapshot(dueState, new Date(2026, 2, 23, 11, 1), 'full');
+    const slim = buildSnapshot(dueState, new Date(2026, 2, 23, 11, 1), 'slim');
+
+    expect(full.activeSession?.questions.length).toBeGreaterThan(0);
+    expect(slim.activeSession?.questions).toEqual([]);
+    expect(slim.activeSession?.responses).toEqual({});
+    expect(slim.activeSessionStatus).toEqual(full.activeSessionStatus);
+    expect(slim.schedule).toEqual(full.schedule);
   });
 });

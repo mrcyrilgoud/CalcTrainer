@@ -56,15 +56,21 @@ function computeStreakDays(history: HistoryPoint[]): number {
   return streak;
 }
 
-export function buildSnapshot(state: AppState, now: Date): AppSnapshot {
-  const activeSession = getActiveSession(state);
+export type SnapshotPayloadStyle = 'full' | 'slim';
+
+export function buildSnapshot(state: AppState, now: Date, style: SnapshotPayloadStyle = 'full'): AppSnapshot {
+  const activeSessionFull = getActiveSession(state);
+  const activeSession =
+    style === 'slim' && activeSessionFull
+      ? { ...activeSessionFull, questions: [], responses: {} }
+      : activeSessionFull;
   const history = buildHistory(state, now);
-  const activeSessionStatus = activeSession ? getActiveSessionStatus(activeSession, now) : null;
+  const activeSessionStatus = activeSessionFull ? getActiveSessionStatus(activeSessionFull, now) : null;
   const completedToday = history[history.length - 1]?.completed ?? 0;
 
   let overdueSummary: string | null = null;
-  if (activeSession) {
-    const slotDate = parseSlotId(activeSession.slotId, state.settings.timezone);
+  if (activeSessionFull) {
+    const slotDate = parseSlotId(activeSessionFull.slotId, state.settings.timezone);
     overdueSummary = `Active session from ${formatDateLabel(slotDate, state.settings.timezone)} at ${formatTimeLabel(slotDate, state.settings.timezone)}. ${activeSessionStatus?.canComplete ? 'You can finish it now.' : `Minimum timer remaining: ${formatDuration(activeSessionStatus?.remainingMs ?? 0)}.`}`;
   }
 
@@ -80,5 +86,20 @@ export function buildSnapshot(state: AppState, now: Date): AppSnapshot {
     completedToday,
     pendingCount: getPendingSessionCount(state),
     overdueSummary
+  };
+}
+
+/** Derive a slim snapshot from a full one (avoids recomputing schedule/history). */
+export function slimDownSnapshot(snapshot: AppSnapshot): AppSnapshot {
+  if (!snapshot.activeSession) {
+    return snapshot;
+  }
+  return {
+    ...snapshot,
+    activeSession: {
+      ...snapshot.activeSession,
+      questions: [],
+      responses: {}
+    }
   };
 }
