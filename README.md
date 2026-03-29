@@ -29,6 +29,7 @@ Useful commands:
 npm run build
 npm run typecheck
 npm test
+npm run test:smoke
 npm run package:dir
 npm run package:mac
 ```
@@ -46,3 +47,11 @@ Packaging output:
 ## Test overrides
 - Set `CALCTRAINER_USER_DATA_DIR=/absolute/path` to redirect the app state directory for isolated QA runs.
 - Set `CALCTRAINER_DISABLE_LOGIN_ITEM=1` to skip `openAtLogin` registration during automated or temporary test launches.
+
+## Electron smoke test
+- Run `npm run test:smoke` from a normal logged-in macOS desktop session.
+- The smoke harness builds the app, seeds an overdue session in an isolated temp profile, launches Electron, switches enforcement to lighter mode, hides and reopens the practice window, completes one full session, verifies the next pending session activates, and confirms the updated state survives a relaunch.
+- Artifacts are written to `output/playwright/smoke-*/`, including screenshots and `summary.json` or `failure.json`.
+- Set `CALCTRAINER_SMOKE_OUTPUT_DIR=/absolute/path` to override the artifact directory.
+- Set `CALCTRAINER_SMOKE_KEEP_PROFILE=1` to preserve the isolated temp profile after a passing run.
+- The harness strips `ELECTRON_RUN_AS_NODE` from the child Electron process automatically, but GUI-less shells can still fail before AppKit registration.
