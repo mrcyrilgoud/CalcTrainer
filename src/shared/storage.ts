@@ -170,12 +170,20 @@ function archiveCorruptFile(filePath: string): void {
   }
 }
 
+function tryPersistPrunedState(filePath: string, state: AppState): void {
+  try {
+    saveStateFile(filePath, state);
+  } catch (error) {
+    console.error(`CalcTrainer could not rewrite pruned state at ${filePath}.`, error);
+  }
+}
+
 export function loadStateFile(filePath: string): AppState {
   const primaryResult = tryLoadStateFile(filePath);
   if (primaryResult.state) {
     const pruned = pruneStateForPersistence(primaryResult.state, new Date());
     if (pruned.changed) {
-      saveStateFile(filePath, pruned.next);
+      tryPersistPrunedState(filePath, pruned.next);
     }
     return pruned.next;
   }
@@ -189,7 +197,7 @@ export function loadStateFile(filePath: string): AppState {
     }
     const pruned = pruneStateForPersistence(backupResult.state, new Date());
     if (pruned.changed) {
-      saveStateFile(filePath, pruned.next);
+      tryPersistPrunedState(filePath, pruned.next);
     }
     return pruned.next;
   }

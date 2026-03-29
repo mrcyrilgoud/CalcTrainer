@@ -97,6 +97,38 @@ describe('storage and question coverage', () => {
     expect(fs.existsSync(`${filePath}.bak`)).toBe(true);
   });
 
+  it('returns pruned state even when rewriting the file during load is not permitted', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'calctrainer-storage-'));
+    const filePath = path.join(tempDir, 'calc-trainer-state.json');
+    const now = new Date('2026-03-28T12:00:00.000Z');
+    const ancientCompletedAt = new Date(now.getTime() - COMPLETED_SESSION_RETENTION_MS - 24 * 60 * 60 * 1000).toISOString();
+    const state = createDefaultState(now);
+
+    state.sessions = [
+      {
+        id: 'old-done',
+        slotId: '2026-03-01T09:00',
+        scheduledFor: '2026-03-01T16:00:00.000Z',
+        status: 'completed',
+        completedAt: ancientCompletedAt,
+        minDurationMs: 600_000,
+        targetDurationMs: 900_000,
+        questions: [{ id: 'q', templateId: 't', title: 't', source: 's', topicTag: 'conv_output_size', difficulty: 'medium', promptType: 'numeric', stem: 'x', workedSolution: 'y', answerSchema: { kind: 'numeric', correctValue: 1, tolerance: 0 } }],
+        responses: { q: {} }
+      }
+    ];
+
+    fs.writeFileSync(filePath, serializeState(state), 'utf8');
+    fs.chmodSync(tempDir, 0o555);
+
+    try {
+      const loaded = loadStateFile(filePath);
+      expect(loaded.sessions).toEqual([]);
+    } finally {
+      fs.chmodSync(tempDir, 0o755);
+    }
+  });
+
   it('builds seven-day history in the configured timezone across DST boundaries', () => {
     const state = createDefaultState(new Date('2026-03-09T07:30:00.000Z'));
     state.settings.timezone = 'America/Los_Angeles';

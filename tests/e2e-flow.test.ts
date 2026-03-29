@@ -189,7 +189,7 @@ describe('end-to-end practice flow', () => {
   it('saveStateFile plus loadStateFile preserves an in-progress session and prunes stale completed rows', () => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'calctrainer-e2e-'));
     const filePath = path.join(tempDir, 'calc-trainer-state.json');
-    const now = new Date('2026-03-20T12:00:00.000Z');
+    const now = makeDate(12, 0);
 
     let state = queueDueSessions(createDefaultState(now), now).state;
     const active = state.sessions.find((session) => session.id === state.activeSessionId);
