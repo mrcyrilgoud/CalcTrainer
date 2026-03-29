@@ -4,6 +4,9 @@ import path from 'node:path';
 import { createDefaultSettings, sanitizeSettings } from './settings';
 import { AppState, PracticeSession, TOPIC_TAGS, TopicTag } from './types';
 
+/** Completed sessions older than this are dropped from persisted state. */
+export const COMPLETED_SESSION_RETENTION_MS = 14 * 24 * 60 * 60 * 1000;
+
 function createEmptyWeakTopicScores(): Record<TopicTag, number> {
   return Object.fromEntries(TOPIC_TAGS.map((topicTag) => [topicTag, 0])) as Record<TopicTag, number>;
 }
@@ -34,6 +37,61 @@ function hydrateSession(rawSession: Partial<PracticeSession>): PracticeSession |
     targetDurationMs: rawSession.targetDurationMs ?? createDefaultSettings().targetSessionMinutes * 60_000,
     questions: Array.isArray(rawSession.questions) ? rawSession.questions : [],
     responses: responses as PracticeSession['responses']
+  };
+}
+
+/**
+ * Drops old completed sessions and strips question payloads from retained completed
+ * sessions to shrink on-disk state. Pending/active sessions are unchanged.
+ */
+export function pruneStateForPersistence(state: AppState, now: Date): { next: AppState; changed: boolean } {
+  const cutoff = now.getTime() - COMPLETED_SESSION_RETENTION_MS;
+  let changed = false;
+
+  const nextSessions = state.sessions
+    .filter((session) => {
+      if (session.status !== 'completed') {
+        return true;
+      }
+      const completedMs = new Date(session.completedAt ?? session.scheduledFor).getTime();
+      if (completedMs < cutoff) {
+        changed = true;
+        return false;
+      }
+      return true;
+    })
+    .map((session) => {
+      if (session.status !== 'completed') {
+        return session;
+      }
+      if (session.questions.length === 0 && Object.keys(session.responses).length === 0) {
+        return session;
+      }
+      changed = true;
+      return {
+        ...session,
+        questions: [],
+        responses: {}
+      };
+    });
+
+  let activeSessionId = state.activeSessionId;
+  if (activeSessionId && !nextSessions.some((session) => session.id === activeSessionId)) {
+    activeSessionId = undefined;
+    changed = true;
+  }
+
+  if (!changed) {
+    return { next: state, changed: false };
+  }
+
+  return {
+    next: {
+      ...state,
+      sessions: nextSessions,
+      activeSessionId
+    },
+    changed: true
   };
 }
 
@@ -112,10 +170,22 @@ function archiveCorruptFile(filePath: string): void {
   }
 }
 
+function tryPersistPrunedState(filePath: string, state: AppState): void {
+  try {
+    saveStateFile(filePath, state);
+  } catch (error) {
+    console.error(`CalcTrainer could not rewrite pruned state at ${filePath}.`, error);
+  }
+}
+
 export function loadStateFile(filePath: string): AppState {
   const primaryResult = tryLoadStateFile(filePath);
   if (primaryResult.state) {
-    return primaryResult.state;
+    const pruned = pruneStateForPersistence(primaryResult.state, new Date());
+    if (pruned.changed) {
+      tryPersistPrunedState(filePath, pruned.next);
+    }
+    return pruned.next;
   }
 
   const backupPath = getBackupFilePath(filePath);
@@ -125,7 +195,11 @@ export function loadStateFile(filePath: string): AppState {
       console.error(`CalcTrainer recovered state from backup ${backupPath}.`, primaryResult.error);
       archiveCorruptFile(filePath);
     }
-    return backupResult.state;
+    const pruned = pruneStateForPersistence(backupResult.state, new Date());
+    if (pruned.changed) {
+      tryPersistPrunedState(filePath, pruned.next);
+    }
+    return pruned.next;
   }
 
   if (primaryResult.exists) {
@@ -141,8 +215,9 @@ export function loadStateFile(filePath: string): AppState {
 
 export function saveStateFile(filePath: string, state: AppState): void {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  const { next: persistedState } = pruneStateForPersistence(state, new Date());
   const tempFilePath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
-  fs.writeFileSync(tempFilePath, serializeState(state), 'utf8');
+  fs.writeFileSync(tempFilePath, serializeState(persistedState), 'utf8');
 
   try {
     fs.renameSync(tempFilePath, filePath);

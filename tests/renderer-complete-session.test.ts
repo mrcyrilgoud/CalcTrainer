@@ -535,6 +535,157 @@ describe('renderer practice flow', () => {
     expect(nextInput?.value).toBe('7');
   });
 
+  it('does not rebuild dashboard sections when snapshot:updated only changes now', async () => {
+    window.history.replaceState({}, '', '?mode=dashboard');
+
+    const baseSnapshot: StubSnapshot = {
+      now: '2026-03-24T10:00:00.000Z',
+      settings: baseSettings,
+      streakDays: 2,
+      completedToday: 1,
+      pendingCount: 1,
+      overdueSummary: 'Still due.',
+      weakTopics: [{ topicTag: 'conv_output_size', label: 'Convolution output size', score: 3 }],
+      history: [{ dateKey: '2026-03-24', completed: 1 }],
+      schedule: [
+        {
+          slotId: '2026-03-24T09:00',
+          scheduledFor: '2026-03-24T16:00:00.000Z',
+          label: '9:00 AM',
+          status: 'completed'
+        }
+      ],
+      activeSession: null,
+      activeSessionStatus: null
+    };
+
+    let deliverSnapshot: ((snap: StubSnapshot) => void) | null = null;
+    const onSnapshot = vi.fn((listener: (snap: unknown) => void) => {
+      deliverSnapshot = (snap) => listener(snap);
+      return () => {
+        deliverSnapshot = null;
+      };
+    });
+
+    Object.assign(window, {
+      calcTrainer: {
+        getSnapshot: vi.fn().mockResolvedValue(baseSnapshot),
+        openDashboard: vi.fn().mockResolvedValue(baseSnapshot),
+        openPractice: vi.fn().mockResolvedValue(baseSnapshot),
+        hidePracticeWindow: vi.fn().mockResolvedValue(baseSnapshot),
+        updateSettings: vi.fn().mockResolvedValue(baseSnapshot),
+        submitAnswer: vi.fn(),
+        revealSolution: vi.fn(),
+        selfCheck: vi.fn(),
+        completeSession: vi.fn(),
+        onSnapshot
+      }
+    });
+
+    await import('../src/renderer/renderer');
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const hero = document.querySelector('[data-section="dashboard-hero"]');
+    const scheduleSection = document.querySelector('[data-section="dashboard-schedule"]');
+    expect(hero).not.toBeNull();
+    expect(scheduleSection).not.toBeNull();
+
+    deliverSnapshot!({
+      ...baseSnapshot,
+      now: '2026-03-24T10:00:01.000Z'
+    });
+    await Promise.resolve();
+
+    expect(document.querySelector('[data-section="dashboard-hero"]')).toBe(hero);
+    expect(document.querySelector('[data-section="dashboard-schedule"]')).toBe(scheduleSection);
+  });
+
+  it('does not rebuild practice question cards when snapshot:updated only changes now', async () => {
+    const baseSnapshot: StubSnapshot = {
+      now: '2026-03-24T10:00:00.000Z',
+      settings: baseSettings,
+      streakDays: 0,
+      completedToday: 0,
+      pendingCount: 1,
+      overdueSummary: 'Active session pending.',
+      weakTopics: [],
+      history: [],
+      schedule: [],
+      activeSessionStatus: {
+        answeredCount: 0,
+        totalQuestions: 1,
+        minDurationMet: false,
+        remainingMs: 60_000,
+        canComplete: false
+      },
+      activeSession: {
+        id: 'session-1',
+        slotId: '2026-03-24T09:00',
+        scheduledFor: '2026-03-24T16:00:00.000Z',
+        status: 'active',
+        startedAt: new Date().toISOString(),
+        minDurationMs: 10 * 60_000,
+        targetDurationMs: 15 * 60_000,
+        questions: [
+          {
+            id: 'q1',
+            title: 'Binary Output Delta',
+            source: 'Lecture 4.pdf',
+            topicTag: 'binary_bce_backprop',
+            promptType: 'structured',
+            stem: 'Write dL/dz^(2).',
+            workedSolution: 'a^(2) - y',
+            answerSchema: {
+              kind: 'structured',
+              acceptableAnswers: ['a^(2)-y'],
+              placeholder: 'a^(2) - y'
+            }
+          }
+        ],
+        responses: { q1: {} }
+      }
+    };
+
+    let deliverSnapshot: ((snap: StubSnapshot) => void) | null = null;
+    const onSnapshot = vi.fn((listener: (snap: unknown) => void) => {
+      deliverSnapshot = (snap) => listener(snap);
+      return () => {
+        deliverSnapshot = null;
+      };
+    });
+
+    Object.assign(window, {
+      calcTrainer: {
+        getSnapshot: vi.fn().mockResolvedValue(baseSnapshot),
+        openDashboard: vi.fn().mockResolvedValue(baseSnapshot),
+        openPractice: vi.fn().mockResolvedValue(baseSnapshot),
+        hidePracticeWindow: vi.fn().mockResolvedValue(baseSnapshot),
+        updateSettings: vi.fn().mockResolvedValue(baseSnapshot),
+        submitAnswer: vi.fn(),
+        revealSolution: vi.fn(),
+        selfCheck: vi.fn(),
+        completeSession: vi.fn(),
+        onSnapshot
+      }
+    });
+
+    await import('../src/renderer/renderer');
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const card = document.querySelector('[data-question-card="q1"]');
+    expect(card).not.toBeNull();
+
+    deliverSnapshot!({
+      ...baseSnapshot,
+      now: '2026-03-24T10:00:05.000Z'
+    });
+    await Promise.resolve();
+
+    expect(document.querySelector('[data-question-card="q1"]')).toBe(card);
+  });
+
   it('saves the lighter-mode reopen delay from the dashboard', async () => {
     window.history.replaceState({}, '', '?mode=dashboard');
 

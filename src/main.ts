@@ -11,7 +11,7 @@ import {
   shouldActivatePracticePrompt,
   shouldKeepPracticeWindowOnTop
 } from './shared/settings';
-import { buildSnapshot } from './shared/selectors';
+import { buildSnapshot, slimDownSnapshot, SnapshotPayloadStyle } from './shared/selectors';
 import { queueDueSessions } from './shared/schedule';
 import {
   completeSession,
@@ -46,8 +46,16 @@ function getRendererPath(): string {
   return path.join(__dirname, '..', 'renderer', 'index.html');
 }
 
-function buildSnapshotNow(): AppSnapshot {
-  return buildSnapshot(appState, new Date());
+function isPracticeWindowWebContents(webContentsId: number): boolean {
+  return Boolean(practiceWindow && !practiceWindow.isDestroyed() && practiceWindow.webContents.id === webContentsId);
+}
+
+function snapshotStyleForWebContents(webContentsId: number): SnapshotPayloadStyle {
+  return isPracticeWindowWebContents(webContentsId) ? 'full' : 'slim';
+}
+
+function buildSnapshotNowForWebContents(webContentsId: number): AppSnapshot {
+  return buildSnapshot(appState, new Date(), snapshotStyleForWebContents(webContentsId));
 }
 
 function getSettings(): AppSettings {
@@ -63,10 +71,12 @@ function persistStateIfChanged(previousState: AppState, options: { skipWebConten
 }
 
 function broadcastSnapshot(options: { skipWebContentsId?: number } = {}): void {
-  const snapshot = buildSnapshotNow();
+  const fullSnapshot = buildSnapshot(appState, new Date(), 'full');
+  const slimSnapshot = slimDownSnapshot(fullSnapshot);
   for (const candidate of [dashboardWindow, practiceWindow]) {
     if (candidate && !candidate.isDestroyed() && candidate.webContents.id !== options.skipWebContentsId) {
-      candidate.webContents.send('snapshot:updated', snapshot);
+      const payload = isPracticeWindowWebContents(candidate.webContents.id) ? fullSnapshot : slimSnapshot;
+      candidate.webContents.send('snapshot:updated', payload);
     }
   }
 }
@@ -254,18 +264,18 @@ function runScheduler(): void {
 }
 
 function registerIpc(): void {
-  ipcMain.handle('snapshot:get', () => buildSnapshotNow());
-  ipcMain.handle('dashboard:open', async () => {
+  ipcMain.handle('snapshot:get', (event) => buildSnapshotNowForWebContents(event.sender.id));
+  ipcMain.handle('dashboard:open', async (event) => {
     await createDashboardWindow();
-    return buildSnapshotNow();
+    return buildSnapshotNowForWebContents(event.sender.id);
   });
-  ipcMain.handle('practice:open', async () => {
+  ipcMain.handle('practice:open', async (event) => {
     await createPracticeWindow({ activate: true });
-    return buildSnapshotNow();
+    return buildSnapshotNowForWebContents(event.sender.id);
   });
-  ipcMain.handle('practice:hide', () => {
+  ipcMain.handle('practice:hide', (event) => {
     hidePracticeWindowForEnforcement();
-    return buildSnapshotNow();
+    return buildSnapshotNowForWebContents(event.sender.id);
   });
   ipcMain.handle(
     'settings:update',
@@ -292,7 +302,7 @@ function registerIpc(): void {
         const keepOnTop = shouldKeepPracticeWindowOnTop(getSettings());
         practiceWindow.setAlwaysOnTop(keepOnTop, keepOnTop ? 'floating' : 'normal');
       }
-      return buildSnapshotNow();
+      return buildSnapshotNowForWebContents(event.sender.id);
     }
   );
   ipcMain.handle('session:submit-answer', (event, payload: { sessionId: string; questionId: string; answerText: string }) => {
@@ -302,20 +312,20 @@ function registerIpc(): void {
     persistStateIfChanged(previousState, { skipWebContentsId: event.sender.id });
     return {
       evaluation: result.evaluation,
-      snapshot: buildSnapshotNow()
+      snapshot: buildSnapshotNowForWebContents(event.sender.id)
     };
   });
   ipcMain.handle('session:reveal-solution', (event, payload: { sessionId: string; questionId: string }) => {
     const previousState = appState;
     appState = revealWorkedSolution(appState, payload.sessionId, payload.questionId, new Date());
     persistStateIfChanged(previousState, { skipWebContentsId: event.sender.id });
-    return buildSnapshotNow();
+    return buildSnapshotNowForWebContents(event.sender.id);
   });
   ipcMain.handle('session:self-check', (event, payload: { sessionId: string; questionId: string; rating: SelfCheckRating }) => {
     const previousState = appState;
     appState = recordSelfCheck(appState, payload.sessionId, payload.questionId, payload.rating);
     persistStateIfChanged(previousState, { skipWebContentsId: event.sender.id });
-    return buildSnapshotNow();
+    return buildSnapshotNowForWebContents(event.sender.id);
   });
   ipcMain.handle('session:complete', async (event, payload: { sessionId: string }) => {
     const previousState = appState;
@@ -330,7 +340,7 @@ function registerIpc(): void {
     return {
       ok: completion.completed,
       reason: completion.reason,
-      snapshot: buildSnapshotNow()
+      snapshot: buildSnapshotNowForWebContents(event.sender.id)
     };
   });
 }

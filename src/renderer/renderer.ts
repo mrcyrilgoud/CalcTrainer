@@ -96,6 +96,15 @@ type AppSnapshot = {
   overdueSummary: string | null;
 };
 
+function snapshotContentJson(snapshot: AppSnapshot): string {
+  const { now: _now, ...rest } = snapshot;
+  return JSON.stringify(rest);
+}
+
+function snapshotsContentEqual(left: AppSnapshot, right: AppSnapshot): boolean {
+  return snapshotContentJson(left) === snapshotContentJson(right);
+}
+
 const appElement = document.getElementById('app');
 const clockElement = document.getElementById('clock-pill');
 const mode = new URLSearchParams(window.location.search).get('mode') === 'practice' ? 'practice' : 'dashboard';
@@ -945,12 +954,23 @@ function render(): void {
   clockElement.textContent = formatNow();
   if (!snapshot) {
     appElement.innerHTML = '<section class="empty-state"><p class="subtle">Loading application state...</p></section>';
+    renderedSnapshot = null;
     return;
   }
 
   const previousSnapshot = renderedSnapshot;
   if (!previousSnapshot) {
     appElement.innerHTML = mode === 'practice' ? renderPractice(snapshot) : renderDashboard(snapshot);
+    renderedSnapshot = snapshot;
+    return;
+  }
+
+  if (snapshotsContentEqual(previousSnapshot, snapshot)) {
+    if (mode === 'practice') {
+      updatePracticeLiveState();
+    } else {
+      updateDashboardLiveState();
+    }
     renderedSnapshot = snapshot;
     return;
   }
