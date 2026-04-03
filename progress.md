@@ -1,0 +1,24 @@
+Original prompt: Conduct a thorough end-to-end test of the app, specifically with the new question bank changes commit. Evaluate for usage bugs that can break user functionality and usability.
+
+- 2026-04-02: Renamed branch to `mrcyrilgoud/e2e-qbank-test`.
+- 2026-04-02: Identified current HEAD commit `bbcd6f0` (`Add generated question-bank workflow with import and publish tools`).
+- 2026-04-02: Read `README.md`, `package.json`, `tests/question-bank.test.ts`, and `scripts/electron-smoke.mjs` to map the new question-bank flows and existing smoke coverage.
+- 2026-04-02: Installed dependencies with `npm install`.
+- 2026-04-02: `npm run typecheck` passed.
+- 2026-04-02: `npx vitest run tests/question-bank.test.ts` passed (6 tests).
+- 2026-04-02: `npm run build` passed.
+- 2026-04-02: `npm run test:smoke` failed in `scripts/electron-smoke.mjs` because the harness still asserts 3 seeded sessions, but current startup produced 8.
+- 2026-04-02: Added `.context/question-bank-e2e.mjs` to automate end-to-end Electron QA for the question-bank workflow with an isolated profile and local mocked proxy.
+- 2026-04-02: End-to-end question-bank flow passed: import PDF+PPTX, duplicate-import handling, draft generation, invalid draft save, valid draft save, single publish, batch publish, archive, question-source switching, relaunch, and generated-only practice session verification.
+- 2026-04-02: Confirmed usability bug in the renderer: clearing all imported-document checkboxes does not disable the "Generate draft questions" button until a later re-render.
+- Artifacts:
+- `output/playwright/question-bank-2026-04-03T00-28-06-089Z/summary.json`
+- `output/playwright/question-bank-2026-04-03T00-28-06-089Z/01-dashboard-initial.png`
+- `output/playwright/question-bank-2026-04-03T00-28-06-089Z/02-after-import.png`
+- `output/playwright/question-bank-2026-04-03T00-28-06-089Z/03-after-generation.png`
+- `output/playwright/question-bank-2026-04-03T00-28-06-089Z/04-after-single-publish.png`
+- `output/playwright/question-bank-2026-04-03T00-28-06-089Z/05-after-batch-publish.png`
+- `output/playwright/question-bank-2026-04-03T00-28-06-089Z/06-after-archive.png`
+- `output/playwright/question-bank-2026-04-03T00-28-06-089Z/07-dashboard-relaunch-generated.png`
+- Remaining TODO:
+- If needed, fix the stale document-selection button state in the renderer and update the legacy smoke harness expectation for current session seeding behavior.
