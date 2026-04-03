@@ -1,5 +1,5 @@
 import { createPracticeSession, activateNextPendingSession } from './practice';
-import { AppState, PracticeSession, ScheduleSlotView } from './types';
+import { AppState, PracticeSession, QuestionBankState, ScheduleSlotView } from './types';
 import { buildSlotId, formatTimeLabel, getDailySlotHours, parseSlotId, toDateKey } from './time';
 
 function sortSessions(sessions: PracticeSession[]): PracticeSession[] {
@@ -8,7 +8,8 @@ function sortSessions(sessions: PracticeSession[]): PracticeSession[] {
 
 export function queueDueSessions(
   state: AppState,
-  now: Date
+  now: Date,
+  questionBankState?: QuestionBankState
 ): { state: AppState; createdSessionIds: string[]; activatedSessionId?: string } {
   const todayKey = toDateKey(now, state.settings.timezone);
   const createdSessionIds: string[] = [];
@@ -33,7 +34,7 @@ export function queueDueSessions(
       ...state,
       sessions: nextSessions
     };
-    const session = createPracticeSession(workingState, slotId, slotDate.toISOString());
+    const session = createPracticeSession(workingState, slotId, slotDate.toISOString(), questionBankState);
     nextSessions.push(session);
     existingSlotIds.add(slotId);
     createdSessionIds.push(session.id);

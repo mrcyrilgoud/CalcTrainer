@@ -2,13 +2,35 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { createDefaultSettings, sanitizeSettings } from './settings';
-import { AppState, PracticeSession, TOPIC_TAGS, TopicTag } from './types';
+import { AppState, PracticeSession, Question, SEEDED_TOPIC_LABELS, TOPIC_TAGS } from './types';
 
 /** Completed sessions older than this are dropped from persisted state. */
 export const COMPLETED_SESSION_RETENTION_MS = 14 * 24 * 60 * 60 * 1000;
 
-function createEmptyWeakTopicScores(): Record<TopicTag, number> {
-  return Object.fromEntries(TOPIC_TAGS.map((topicTag) => [topicTag, 0])) as Record<TopicTag, number>;
+function createEmptyWeakTopicScores(): Record<string, number> {
+  return Object.fromEntries(TOPIC_TAGS.map((topicTag) => [topicTag, 0]));
+}
+
+function hydrateQuestion(rawQuestion: Partial<Question>): Question | null {
+  if (!rawQuestion.id || !rawQuestion.title || !rawQuestion.source || !rawQuestion.promptType || !rawQuestion.stem || !rawQuestion.workedSolution || !rawQuestion.answerSchema) {
+    return null;
+  }
+
+  const topicTag = rawQuestion.topicId ?? rawQuestion.topicTag ?? 'generated_topic';
+  const topicLabel =
+    rawQuestion.topicLabel
+    ?? SEEDED_TOPIC_LABELS[topicTag as keyof typeof SEEDED_TOPIC_LABELS]
+    ?? topicTag.replace(/_/g, ' ');
+
+  return {
+    ...rawQuestion,
+    bankQuestionId: rawQuestion.bankQuestionId ?? rawQuestion.templateId ?? rawQuestion.id,
+    origin: rawQuestion.origin === 'generated' ? 'generated' : 'seeded',
+    templateId: rawQuestion.templateId ?? rawQuestion.bankQuestionId ?? rawQuestion.id,
+    topicId: topicTag,
+    topicTag,
+    topicLabel
+  } as Question;
 }
 
 function getBackupFilePath(filePath: string): string {
@@ -35,7 +57,9 @@ function hydrateSession(rawSession: Partial<PracticeSession>): PracticeSession |
     lastPromptedAt: rawSession.lastPromptedAt,
     minDurationMs: rawSession.minDurationMs ?? createDefaultSettings().minimumSessionMinutes * 60_000,
     targetDurationMs: rawSession.targetDurationMs ?? createDefaultSettings().targetSessionMinutes * 60_000,
-    questions: Array.isArray(rawSession.questions) ? rawSession.questions : [],
+    questions: Array.isArray(rawSession.questions)
+      ? rawSession.questions.map((question) => hydrateQuestion(question)).filter((question): question is Question => question !== null)
+      : [],
     responses: responses as PracticeSession['responses']
   };
 }
@@ -116,8 +140,12 @@ export function hydrateState(raw: Partial<AppState> | null | undefined): AppStat
   });
 
   const weakTopicScores = createEmptyWeakTopicScores();
+  const rawWeakTopicScores = raw?.weakTopicScores && typeof raw.weakTopicScores === 'object' ? raw.weakTopicScores : {};
+  for (const [topicId, score] of Object.entries(rawWeakTopicScores)) {
+    weakTopicScores[topicId] = Number(score ?? 0);
+  }
   for (const topicTag of TOPIC_TAGS) {
-    weakTopicScores[topicTag] = Number(raw?.weakTopicScores?.[topicTag] ?? 0);
+    weakTopicScores[topicTag] = Number(rawWeakTopicScores[topicTag] ?? weakTopicScores[topicTag] ?? 0);
   }
 
   const sessions = Array.isArray(raw?.sessions)

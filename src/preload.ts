@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron';
 
-import { AppSettings, SelfCheckRating } from './shared/types';
+import { AppSettings, DraftQuestionFields, SelfCheckRating } from './shared/types';
 
 type SnapshotListener = (snapshot: unknown) => void;
 
@@ -9,7 +9,15 @@ contextBridge.exposeInMainWorld('calcTrainer', {
   openDashboard: () => ipcRenderer.invoke('dashboard:open'),
   openPractice: () => ipcRenderer.invoke('practice:open'),
   hidePracticeWindow: () => ipcRenderer.invoke('practice:hide'),
-  updateSettings: (payload: Partial<Pick<AppSettings, 'enforcementStyle' | 'lighterReopenDelayMinutes'>>) =>
+  getQuestionBank: () => ipcRenderer.invoke('questionBank:get'),
+  importDocuments: () => ipcRenderer.invoke('questionBank:importDocuments'),
+  generateDraftBatch: (payload: { documentIds: string[] }) => ipcRenderer.invoke('questionBank:generateDraftBatch', payload),
+  updateDraft: (payload: { draftId: string; fields: Partial<DraftQuestionFields> }) =>
+    ipcRenderer.invoke('questionBank:updateDraft', payload),
+  deleteDraft: (payload: { draftId?: string; batchId?: string }) => ipcRenderer.invoke('questionBank:deleteDraft', payload),
+  publishDrafts: (payload: { draftIds: string[] }) => ipcRenderer.invoke('questionBank:publishDrafts', payload),
+  archivePublished: (payload: { questionIds: string[] }) => ipcRenderer.invoke('questionBank:archivePublished', payload),
+  updateSettings: (payload: Partial<Pick<AppSettings, 'enforcementStyle' | 'lighterReopenDelayMinutes' | 'questionSourceMode'>>) =>
     ipcRenderer.invoke('settings:update', payload),
   submitAnswer: (payload: { sessionId: string; questionId: string; answerText: string }) =>
     ipcRenderer.invoke('session:submit-answer', payload),

@@ -486,6 +486,92 @@ button.secondary,
   background: rgba(154, 47, 31, 0.1);
 }
 
+.compact-stats {
+  margin-top: 16px;
+}
+
+.document-list,
+.draft-list,
+.published-list,
+.citation-list,
+.summary-grid {
+  display: grid;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.document-item,
+.published-item {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  justify-content: space-between;
+  padding: 14px;
+  border-radius: 18px;
+  background: rgba(255, 251, 244, 0.9);
+  border: 1px solid rgba(31, 42, 36, 0.08);
+}
+
+.document-item.ready {
+  border-color: rgba(31, 122, 82, 0.2);
+}
+
+.document-item.failed {
+  border-color: rgba(154, 47, 31, 0.18);
+}
+
+.document-item input {
+  margin-top: 4px;
+}
+
+.document-copy {
+  display: grid;
+  gap: 4px;
+  flex: 1;
+}
+
+.draft-review {
+  margin-top: 8px;
+}
+
+.draft-batch + .draft-batch {
+  margin-top: 24px;
+  padding-top: 24px;
+  border-top: 1px solid rgba(31, 42, 36, 0.08);
+}
+
+.draft-editor-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.editor-field {
+  display: grid;
+  gap: 8px;
+}
+
+.editor-field.full-span {
+  grid-column: 1 / -1;
+}
+
+.compact-area {
+  min-height: 110px;
+}
+
+.issue-list {
+  margin: 12px 0 0;
+  padding-left: 18px;
+}
+
+.published-list {
+  margin-top: 18px;
+}
+
+.published-item {
+  align-items: center;
+}
+
 .checklist {
   margin: 14px 0 0;
   padding-left: 18px;
@@ -517,7 +603,8 @@ button.secondary,
   .practice-meta,
   .stat-row,
   .schedule-grid,
-  .history-row {
+  .history-row,
+  .draft-editor-grid {
     grid-template-columns: 1fr;
   }
 

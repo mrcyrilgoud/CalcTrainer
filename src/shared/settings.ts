@@ -39,8 +39,13 @@ export function createDefaultSettings(): AppSettings {
     targetSessionMinutes: 15,
     enforcementMode: 'must_finish_session',
     enforcementStyle: 'lighter',
-    lighterReopenDelayMinutes: DEFAULT_LIGHTER_REOPEN_DELAY_MINUTES
+    lighterReopenDelayMinutes: DEFAULT_LIGHTER_REOPEN_DELAY_MINUTES,
+    questionSourceMode: 'mixed'
   };
+}
+
+function normalizeQuestionSourceMode(value: unknown): AppSettings['questionSourceMode'] {
+  return value === 'seeded' || value === 'generated' || value === 'mixed' ? value : 'mixed';
 }
 
 export function normalizeLighterReopenDelayMinutes(value: unknown): number {
@@ -56,7 +61,8 @@ export function sanitizeSettings(settings: AppSettings): AppSettings {
   return {
     ...settings,
     timezone: normalizeTimezone(settings.timezone),
-    lighterReopenDelayMinutes: normalizeLighterReopenDelayMinutes(settings.lighterReopenDelayMinutes)
+    lighterReopenDelayMinutes: normalizeLighterReopenDelayMinutes(settings.lighterReopenDelayMinutes),
+    questionSourceMode: normalizeQuestionSourceMode(settings.questionSourceMode)
   };
 }
 

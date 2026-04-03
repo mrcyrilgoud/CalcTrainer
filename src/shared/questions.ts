@@ -1,7 +1,7 @@
 import { SESSION_QUESTION_COUNT } from './settings';
-import { AppState, Difficulty, PromptType, Question, TopicTag } from './types';
+import { AppState, Difficulty, PromptType, PublishedBankQuestion, Question, QuestionBankState, SEEDED_TOPIC_LABELS, SelectionBucket, TopicTag } from './types';
 
-type SelectionBucket = 'derivation' | 'backprop_auto' | 'cnn_auto' | 'concept';
+type BuiltSeededQuestion = Omit<Question, 'id' | 'bankQuestionId' | 'origin' | 'topicId' | 'topicLabel'>;
 
 type QuestionTemplate = {
   id: string;
@@ -10,7 +10,7 @@ type QuestionTemplate = {
   difficulty: Difficulty;
   promptType: PromptType;
   bucket: SelectionBucket;
-  build: (rng: () => number, slotId: string) => Omit<Question, 'id'>;
+  build: (rng: () => number, slotId: string) => BuiltSeededQuestion;
 };
 
 function hashString(seed: string): number {
@@ -64,6 +64,15 @@ function shuffle<T>(rng: () => number, values: T[]): T[] {
 function makeId(slotId: string, templateId: string): string {
   return `${slotId}::${templateId}`;
 }
+
+type QuestionBankCandidate = {
+  bankQuestionId: string;
+  origin: 'seeded' | 'generated';
+  topicTag: string;
+  topicLabel: string;
+  bucket: SelectionBucket;
+  materialize: (rng: () => number, slotId: string) => Question;
+};
 
 const QUESTION_TEMPLATES: QuestionTemplate[] = [
   {
@@ -641,71 +650,175 @@ const CNN_TOPICS: TopicTag[] = [
   'conv_parameter_count'
 ];
 
-function topicWeight(topicTag: TopicTag, state: AppState): number {
+function topicWeight(topicTag: string, state: AppState): number {
   const weakScore = state.weakTopicScores[topicTag] ?? 0;
   const assignmentBoost = topicTag === 'binary_bce_backprop' || topicTag === 'multiclass_softmax_cross_entropy' ? 1.6 : 1;
   return 1 + weakScore * 0.55 + assignmentBoost;
 }
 
-function pickUniqueTemplate(
+function createSeededCandidate(template: QuestionTemplate): QuestionBankCandidate {
+  const topicLabel = SEEDED_TOPIC_LABELS[template.topicTag as keyof typeof SEEDED_TOPIC_LABELS] ?? template.topicTag;
+  return {
+    bankQuestionId: `seeded:${template.id}`,
+    origin: 'seeded',
+    topicTag: template.topicTag,
+    topicLabel,
+    bucket: template.bucket,
+    materialize: (rng, slotId) => {
+      const question = template.build(rng, slotId);
+      return {
+        id: makeId(slotId, template.id),
+        bankQuestionId: `seeded:${template.id}`,
+        origin: 'seeded',
+        topicId: template.topicTag,
+        topicLabel,
+        ...question
+      };
+    }
+  };
+}
+
+function createGeneratedCandidate(question: PublishedBankQuestion): QuestionBankCandidate {
+  return {
+    bankQuestionId: question.bankQuestionId,
+    origin: 'generated',
+    topicTag: question.topicId,
+    topicLabel: question.topicLabel,
+    bucket: question.selectionBucket,
+    materialize: (_rng, slotId) => ({
+      id: makeId(slotId, question.bankQuestionId),
+      bankQuestionId: question.bankQuestionId,
+      origin: 'generated',
+      templateId: question.bankQuestionId,
+      title: question.title,
+      source: question.source,
+      topicId: question.topicId,
+      topicLabel: question.topicLabel,
+      topicTag: question.topicId,
+      difficulty: question.difficulty,
+      promptType: question.promptType,
+      stem: question.stem,
+      hint: question.hint,
+      workedSolution: question.workedSolution,
+      answerSchema: question.answerSchema
+    })
+  };
+}
+
+function pickUniqueCandidate(
   rng: () => number,
   state: AppState,
   chosenIds: Set<string>,
-  predicate: (template: QuestionTemplate) => boolean
-): QuestionTemplate {
-  const candidates = QUESTION_TEMPLATES.filter((template) => !chosenIds.has(template.id) && predicate(template));
-  const weightedCandidates = candidates.map((template) => ({
-    item: template,
-    weight: topicWeight(template.topicTag, state)
+  candidates: QuestionBankCandidate[],
+  predicate: (candidate: QuestionBankCandidate) => boolean
+): QuestionBankCandidate | null {
+  const matchingCandidates = candidates.filter((candidate) => !chosenIds.has(candidate.bankQuestionId) && predicate(candidate));
+  if (matchingCandidates.length === 0) {
+    return null;
+  }
+  const weightedCandidates = matchingCandidates.map((candidate) => ({
+    item: candidate,
+    weight: topicWeight(candidate.topicTag, state)
   }));
   return weightedPick(rng, weightedCandidates);
 }
 
-function materializeQuestion(template: QuestionTemplate, rng: () => number, slotId: string): Question {
-  return {
-    id: makeId(slotId, template.id),
-    ...template.build(rng, slotId)
-  };
+function resolveCandidatePools(state: AppState, questionBankState?: QuestionBankState): {
+  primary: QuestionBankCandidate[];
+  fallback: QuestionBankCandidate[];
+} {
+  const publishedQuestions = questionBankState?.publishedQuestions ?? [];
+  const seededCandidates = QUESTION_TEMPLATES.map(createSeededCandidate);
+  const generatedCandidates = publishedQuestions
+    .filter((question) => !question.archivedAt)
+    .map(createGeneratedCandidate);
+
+  switch (state.settings.questionSourceMode) {
+    case 'generated':
+      return {
+        primary: generatedCandidates,
+        fallback: seededCandidates
+      };
+    case 'mixed':
+      return {
+        primary: [...generatedCandidates, ...seededCandidates],
+        fallback: []
+      };
+    case 'seeded':
+    default:
+      return {
+        primary: seededCandidates,
+        fallback: []
+      };
+  }
 }
 
-export function generateQuestionsForSession(state: AppState, slotId: string): Question[] {
-  const rng = createRng(slotId);
-  const chosenTemplateIds = new Set<string>();
-  const templates: QuestionTemplate[] = [];
-
-  const derivation = pickUniqueTemplate(rng, state, chosenTemplateIds, (template) => template.bucket === 'derivation');
-  chosenTemplateIds.add(derivation.id);
-  templates.push(derivation);
-
-  const backpropAuto = pickUniqueTemplate(
-    rng,
-    state,
-    chosenTemplateIds,
-    (template) => template.bucket === 'backprop_auto' && BACKPROP_TOPICS.includes(template.topicTag)
-  );
-  chosenTemplateIds.add(backpropAuto.id);
-  templates.push(backpropAuto);
-
-  const cnnAuto = pickUniqueTemplate(
-    rng,
-    state,
-    chosenTemplateIds,
-    (template) => template.bucket === 'cnn_auto' && CNN_TOPICS.includes(template.topicTag)
-  );
-  chosenTemplateIds.add(cnnAuto.id);
-  templates.push(cnnAuto);
-
-  const concept = pickUniqueTemplate(rng, state, chosenTemplateIds, (template) => template.bucket === 'concept');
-  chosenTemplateIds.add(concept.id);
-  templates.push(concept);
-
-  while (templates.length < SESSION_QUESTION_COUNT) {
-    const extraTemplate = pickUniqueTemplate(rng, state, chosenTemplateIds, () => true);
-    chosenTemplateIds.add(extraTemplate.id);
-    templates.push(extraTemplate);
+function pickCandidateWithFallback(
+  rng: () => number,
+  state: AppState,
+  chosenIds: Set<string>,
+  pools: { primary: QuestionBankCandidate[]; fallback: QuestionBankCandidate[] },
+  predicate: (candidate: QuestionBankCandidate) => boolean
+): QuestionBankCandidate {
+  const primaryPick = pickUniqueCandidate(rng, state, chosenIds, pools.primary, predicate);
+  if (primaryPick) {
+    return primaryPick;
   }
 
-  return shuffle(rng, templates).map((template) => materializeQuestion(template, rng, slotId));
+  const fallbackPick = pickUniqueCandidate(rng, state, chosenIds, pools.fallback, predicate);
+  if (fallbackPick) {
+    return fallbackPick;
+  }
+
+  const anyPick = pickUniqueCandidate(rng, state, chosenIds, [...pools.primary, ...pools.fallback], () => true);
+  if (anyPick) {
+    return anyPick;
+  }
+
+  throw new Error('CalcTrainer could not assemble a question set from the available bank.');
+}
+
+export function generateQuestionsForSession(state: AppState, slotId: string, questionBankState?: QuestionBankState): Question[] {
+  const rng = createRng(slotId);
+  const chosenCandidateIds = new Set<string>();
+  const candidates: QuestionBankCandidate[] = [];
+  const pools = resolveCandidatePools(state, questionBankState);
+
+  const derivation = pickCandidateWithFallback(rng, state, chosenCandidateIds, pools, (candidate) => candidate.bucket === 'derivation');
+  chosenCandidateIds.add(derivation.bankQuestionId);
+  candidates.push(derivation);
+
+  const backpropAuto = pickCandidateWithFallback(
+    rng,
+    state,
+    chosenCandidateIds,
+    pools,
+    (candidate) => candidate.bucket === 'backprop_auto'
+  );
+  chosenCandidateIds.add(backpropAuto.bankQuestionId);
+  candidates.push(backpropAuto);
+
+  const cnnAuto = pickCandidateWithFallback(
+    rng,
+    state,
+    chosenCandidateIds,
+    pools,
+    (candidate) => candidate.bucket === 'cnn_auto'
+  );
+  chosenCandidateIds.add(cnnAuto.bankQuestionId);
+  candidates.push(cnnAuto);
+
+  const concept = pickCandidateWithFallback(rng, state, chosenCandidateIds, pools, (candidate) => candidate.bucket === 'concept');
+  chosenCandidateIds.add(concept.bankQuestionId);
+  candidates.push(concept);
+
+  while (candidates.length < SESSION_QUESTION_COUNT) {
+    const extraCandidate = pickCandidateWithFallback(rng, state, chosenCandidateIds, pools, () => true);
+    chosenCandidateIds.add(extraCandidate.bankQuestionId);
+    candidates.push(extraCandidate);
+  }
+
+  return shuffle(rng, candidates).map((candidate) => candidate.materialize(rng, slotId));
 }
 
 export function getQuestionBankCoverage(): TopicTag[] {

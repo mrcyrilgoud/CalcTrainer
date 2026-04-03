@@ -1,8 +1,10 @@
 type SelfCheckRating = 'needs_work' | 'solid';
 type EnforcementStyle = 'strict' | 'lighter';
-
+type QuestionSourceMode = 'seeded' | 'generated' | 'mixed';
+type Difficulty = 'medium' | 'hard';
 type SessionStatus = 'pending' | 'active' | 'completed';
 type PromptType = 'multiple_choice' | 'numeric' | 'structured' | 'derivation';
+type SelectionBucket = 'derivation' | 'backprop_auto' | 'cnn_auto' | 'concept';
 
 type AttemptEvaluation = {
   correct: boolean;
@@ -17,20 +19,26 @@ type QuestionProgress = {
   selfCheck?: SelfCheckRating;
 };
 
+type AnswerSchema =
+  | { kind: 'multiple_choice'; options: string[]; correctIndex: number }
+  | { kind: 'numeric'; correctValue: number; tolerance: number; unitLabel?: string }
+  | { kind: 'structured'; acceptableAnswers: string[]; placeholder?: string }
+  | { kind: 'derivation'; checklist: string[] };
+
 type Question = {
   id: string;
+  bankQuestionId: string;
+  origin: 'seeded' | 'generated';
   title: string;
   source: string;
+  topicId: string;
+  topicLabel: string;
   topicTag: string;
   promptType: PromptType;
   stem: string;
   hint?: string;
   workedSolution: string;
-  answerSchema:
-    | { kind: 'multiple_choice'; options: string[]; correctIndex: number }
-    | { kind: 'numeric'; correctValue: number; tolerance: number; unitLabel?: string }
-    | { kind: 'structured'; acceptableAnswers: string[]; placeholder?: string }
-    | { kind: 'derivation'; checklist: string[] };
+  answerSchema: AnswerSchema;
 };
 
 type PracticeSession = {
@@ -60,6 +68,7 @@ type ScheduleSlotView = {
 };
 
 type TopicScore = {
+  topicId: string;
   topicTag: string;
   label: string;
   score: number;
@@ -68,6 +77,121 @@ type TopicScore = {
 type HistoryPoint = {
   dateKey: string;
   completed: number;
+};
+
+type QuestionSourceRef = {
+  documentId: string;
+  documentName: string;
+  chunkId?: string;
+  locatorLabel: string;
+  excerpt: string;
+  pageNumber?: number;
+  slideNumber?: number;
+};
+
+type DraftValidationIssue = {
+  field: string;
+  message: string;
+};
+
+type GeneratedQuestionDraft = {
+  id: string;
+  batchId: string;
+  createdAt: string;
+  updatedAt: string;
+  rawIndex: number;
+  title: string;
+  source: string;
+  topicId: string;
+  topicLabel: string;
+  difficulty: Difficulty;
+  promptType: PromptType;
+  selectionBucket: SelectionBucket;
+  stem: string;
+  hint?: string;
+  workedSolution: string;
+  answerSchema: AnswerSchema;
+  citations: QuestionSourceRef[];
+  validationIssues: DraftValidationIssue[];
+};
+
+type QuestionGenerationBatch = {
+  id: string;
+  createdAt: string;
+  updatedAt: string;
+  documentIds: string[];
+  requestedDraftCount: number;
+  draftIds: string[];
+  status: 'running' | 'drafts_ready' | 'partial_error' | 'generation_failed';
+  generationMode: 'raw_files' | 'chunked_responses' | 'chunked_low_level';
+  completedRequestCount: number;
+  totalRequestCount: number;
+  repairedDraftCount: number;
+  errorMessage?: string;
+  modelName?: string;
+};
+
+type QuestionBankDocument = {
+  id: string;
+  fileName: string;
+  kind: 'pdf' | 'pptx';
+  checksumSha256: string;
+  importedAt: string;
+  extractionStatus: 'pending' | 'ready' | 'failed';
+  extractionError?: string;
+  chunkCount: number;
+};
+
+type PublishedBankQuestion = {
+  bankQuestionId: string;
+  origin: 'generated';
+  title: string;
+  source: string;
+  topicId: string;
+  topicLabel: string;
+  difficulty: Difficulty;
+  promptType: PromptType;
+  selectionBucket: SelectionBucket;
+  stem: string;
+  hint?: string;
+  workedSolution: string;
+  answerSchema: AnswerSchema;
+  citations: QuestionSourceRef[];
+  sourceBatchId: string;
+  createdAt: string;
+  updatedAt: string;
+  archivedAt?: string;
+};
+
+type QuestionBankView = {
+  documents: QuestionBankDocument[];
+  batches: QuestionGenerationBatch[];
+  drafts: GeneratedQuestionDraft[];
+  publishedQuestions: PublishedBankQuestion[];
+  publishedSummary: {
+    activeCount: number;
+    archivedCount: number;
+    byBucket: Array<{ key: string; label: string; count: number }>;
+    byTopic: Array<{ key: string; label: string; count: number }>;
+    coverage: {
+      generatedQuestionCount: number;
+      missingBuckets: SelectionBucket[];
+      requiresSeededFallback: boolean;
+    };
+  };
+  proxyStatus: {
+    configured: boolean;
+    baseUrl?: string;
+    model?: string;
+    parseMode: 'auto' | 'raw_files' | 'chunked';
+    message: string;
+  };
+};
+
+type QuestionBankMutationResult = {
+  ok: boolean;
+  message: string;
+  view: QuestionBankView;
 };
 
 type AppSnapshot = {
@@ -84,6 +208,7 @@ type AppSnapshot = {
     enforcementMode: 'must_finish_session';
     enforcementStyle: EnforcementStyle;
     lighterReopenDelayMinutes: number;
+    questionSourceMode: QuestionSourceMode;
   };
   activeSession: PracticeSession | null;
   activeSessionStatus: ActiveSessionStatus | null;
@@ -105,6 +230,17 @@ function snapshotsContentEqual(left: AppSnapshot, right: AppSnapshot): boolean {
   return snapshotContentJson(left) === snapshotContentJson(right);
 }
 
+function questionBankContentJson(view: QuestionBankView): string {
+  return JSON.stringify(view);
+}
+
+function questionBankContentEqual(left: QuestionBankView | null, right: QuestionBankView | null): boolean {
+  if (!left || !right) {
+    return left === right;
+  }
+  return questionBankContentJson(left) === questionBankContentJson(right);
+}
+
 const appElement = document.getElementById('app');
 const clockElement = document.getElementById('clock-pill');
 const mode = new URLSearchParams(window.location.search).get('mode') === 'practice' ? 'practice' : 'dashboard';
@@ -112,8 +248,11 @@ const nativeWindowClose = window.close.bind(window);
 
 let snapshot: AppSnapshot | null = null;
 let renderedSnapshot: AppSnapshot | null = null;
+let questionBankView: QuestionBankView | null = null;
+let renderedQuestionBankView: QuestionBankView | null = null;
 let bannerMessage = '';
 const draftAnswers: Record<string, string> = {};
+let selectedDocumentIds = new Set<string>();
 
 function escapeHtml(input: string): string {
   return input
@@ -358,6 +497,36 @@ function applySnapshot(nextSnapshot: AppSnapshot): void {
   render();
 }
 
+function syncSelectedDocuments(): void {
+  const readyDocumentIds = (questionBankView?.documents ?? [])
+    .filter((document) => document.extractionStatus === 'ready')
+    .map((document) => document.id);
+  const readySet = new Set(readyDocumentIds);
+
+  if (selectedDocumentIds.size === 0) {
+    selectedDocumentIds = new Set(readyDocumentIds);
+    return;
+  }
+
+  selectedDocumentIds = new Set([...selectedDocumentIds].filter((documentId) => readySet.has(documentId)));
+  if (selectedDocumentIds.size === 0 && readyDocumentIds.length > 0) {
+    selectedDocumentIds = new Set(readyDocumentIds);
+  }
+}
+
+function applyQuestionBank(nextQuestionBankView: QuestionBankView): void {
+  questionBankView = nextQuestionBankView;
+  syncSelectedDocuments();
+  render();
+}
+
+function applyQuestionBankResult(result: QuestionBankMutationResult): void {
+  questionBankView = result.view;
+  syncSelectedDocuments();
+  setBanner(result.message);
+  render();
+}
+
 function setupPracticeWindowCloseInterceptor(): void {
   if (mode !== 'practice') {
     return;
@@ -442,6 +611,28 @@ function enforcementDescription(style: EnforcementStyle): string {
 
 function getDraftLighterDelay(): string {
   return String(snapshot?.settings.lighterReopenDelayMinutes ?? '');
+}
+
+function questionSourceModeDescription(modeValue: QuestionSourceMode): string {
+  switch (modeValue) {
+    case 'seeded':
+      return 'Use only the built-in seeded bank for future sessions.';
+    case 'generated':
+      return 'Prefer approved generated questions and fall back to seeded ones only when coverage is incomplete.';
+    case 'mixed':
+    default:
+      return 'Mix approved generated questions with the seeded bank for future sessions.';
+  }
+}
+
+function documentStatusLabel(document: QuestionBankDocument): string {
+  if (document.extractionStatus === 'ready') {
+    return `${document.chunkCount} extractable chunk${document.chunkCount === 1 ? '' : 's'}`;
+  }
+  if (document.extractionStatus === 'failed') {
+    return document.extractionError ?? 'Extraction failed';
+  }
+  return 'Waiting for extraction';
 }
 
 function renderBanner(): string {
@@ -645,23 +836,428 @@ function renderDashboardCoverage(): string {
   `;
 }
 
-function renderDashboard(snapshotValue: AppSnapshot): string {
+function renderQuestionSourceCard(snapshotValue: AppSnapshot, questionBankValue: QuestionBankView | null): string {
+  const coverage = questionBankValue?.publishedSummary.coverage;
   return `
-    <section class="grid dashboard-grid" data-view="dashboard">
-      <div class="grid">
-        ${renderDashboardHero(snapshotValue)}
-        ${renderDashboardSchedule(snapshotValue)}
-        ${renderDashboardHistory(snapshotValue)}
+    <article class="card" data-section="dashboard-question-source">
+      <h2 class="card-title">Question source</h2>
+      <p class="subtle">${escapeHtml(questionSourceModeDescription(snapshotValue.settings.questionSourceMode))}</p>
+      <div class="segmented-control">
+        ${(['seeded', 'generated', 'mixed'] as const)
+          .map(
+            (modeValue) => `
+              <button
+                class="${snapshotValue.settings.questionSourceMode === modeValue ? 'primary selected' : 'secondary'}"
+                data-action="set-question-source"
+                data-source-mode="${modeValue}"
+              >
+                ${escapeHtml(modeValue)}
+              </button>`
+          )
+          .join('')}
       </div>
+      <div class="stat-row compact-stats">
+        <div class="stat-box">
+          <span class="stat-label">Approved generated</span>
+          <span class="stat-value">${questionBankValue?.publishedSummary.activeCount ?? 0}</span>
+        </div>
+        <div class="stat-box">
+          <span class="stat-label">Archived</span>
+          <span class="stat-value">${questionBankValue?.publishedSummary.archivedCount ?? 0}</span>
+        </div>
+        <div class="stat-box">
+          <span class="stat-label">Missing buckets</span>
+          <span class="stat-value">${coverage?.missingBuckets.length ?? 0}</span>
+        </div>
+      </div>
+      ${coverage?.requiresSeededFallback
+        ? `<div class="status-banner">Generated-only coverage is incomplete. CalcTrainer will fill missing slots from the seeded bank.</div>`
+        : '<p class="small-copy">Generated coverage is complete for the current session shape.</p>'}
+      ${coverage && coverage.missingBuckets.length > 0
+        ? `<p class="small-copy">Missing buckets: ${escapeHtml(coverage.missingBuckets.join(', '))}</p>`
+        : ''}
+    </article>
+  `;
+}
 
-      <div class="grid">
-        ${renderDashboardPressure(snapshotValue)}
-        ${renderDashboardEnforcement(snapshotValue)}
-        ${renderDashboardWeakTopics(snapshotValue)}
-        ${renderDashboardCoverage()}
+function renderDocumentLibrary(questionBankValue: QuestionBankView | null): string {
+  const documents = questionBankValue?.documents ?? [];
+  const readyDocuments = documents.filter((document) => document.extractionStatus === 'ready');
+  const generateDisabled = !questionBankValue?.proxyStatus.configured || readyDocuments.length === 0 || selectedDocumentIds.size === 0;
+
+  return `
+    <article class="card" data-section="dashboard-documents">
+      <h2 class="card-title">Document library</h2>
+      <p class="subtle">${escapeHtml(questionBankValue?.proxyStatus.message ?? 'Loading document and proxy state...')}</p>
+      <div class="actions">
+        <button class="secondary" data-action="import-documents">Import PDF or PPTX</button>
+        <button class="primary" data-action="generate-drafts" ${generateDisabled ? 'disabled' : ''}>Generate draft questions</button>
       </div>
+      ${documents.length === 0
+        ? '<p class="small-copy">No documents imported yet.</p>'
+        : `
+          <div class="document-list">
+            ${documents
+              .map(
+                (document) => `
+                  <label class="document-item ${document.extractionStatus}">
+                    <input
+                      type="checkbox"
+                      ${document.extractionStatus === 'ready' ? '' : 'disabled'}
+                      ${selectedDocumentIds.has(document.id) ? 'checked' : ''}
+                      data-document-id="${document.id}"
+                    />
+                    <div class="document-copy">
+                      <strong>${escapeHtml(document.fileName)}</strong>
+                      <span class="small-copy">${escapeHtml(document.kind.toUpperCase())} • ${escapeHtml(documentStatusLabel(document))}</span>
+                    </div>
+                  </label>`
+              )
+              .join('')}
+          </div>`}
+      ${questionBankValue?.proxyStatus.baseUrl
+        ? `<p class="small-copy">Proxy: ${escapeHtml(questionBankValue.proxyStatus.baseUrl)}${questionBankValue.proxyStatus.model ? ` (${escapeHtml(questionBankValue.proxyStatus.model)})` : ''} • parse mode ${escapeHtml(questionBankValue.proxyStatus.parseMode)}</p>`
+        : ''}
+    </article>
+  `;
+}
+
+function renderDraftIssues(draft: GeneratedQuestionDraft): string {
+  if (draft.validationIssues.length === 0) {
+    return '<p class="small-copy">Valid draft. You can publish it directly.</p>';
+  }
+  return `
+    <ul class="issue-list">
+      ${draft.validationIssues
+        .map((issue) => `<li><strong>${escapeHtml(issue.field)}</strong>: ${escapeHtml(issue.message)}</li>`)
+        .join('')}
+    </ul>
+  `;
+}
+
+function renderDraftSchemaEditor(draft: GeneratedQuestionDraft): string {
+  switch (draft.answerSchema.kind) {
+    case 'multiple_choice':
+      return `
+        <label class="editor-field">
+          <span class="stat-label">Options</span>
+          <textarea class="text-area compact-area" data-draft-field="mc-options">${escapeHtml(draft.answerSchema.options.join('\n'))}</textarea>
+        </label>
+        <label class="editor-field">
+          <span class="stat-label">Correct index</span>
+          <input class="text-input" type="number" min="0" step="1" value="${draft.answerSchema.correctIndex}" data-draft-field="mc-correct-index" />
+        </label>
+      `;
+    case 'numeric':
+      return `
+        <label class="editor-field">
+          <span class="stat-label">Correct value</span>
+          <input class="text-input" type="number" value="${draft.answerSchema.correctValue}" data-draft-field="numeric-correct-value" />
+        </label>
+        <label class="editor-field">
+          <span class="stat-label">Tolerance</span>
+          <input class="text-input" type="number" min="0" step="0.01" value="${draft.answerSchema.tolerance}" data-draft-field="numeric-tolerance" />
+        </label>
+        <label class="editor-field">
+          <span class="stat-label">Unit</span>
+          <input class="text-input" value="${escapeHtml(draft.answerSchema.unitLabel ?? '')}" data-draft-field="numeric-unit-label" />
+        </label>
+      `;
+    case 'structured':
+      return `
+        <label class="editor-field">
+          <span class="stat-label">Accepted answers</span>
+          <textarea class="text-area compact-area" data-draft-field="structured-answers">${escapeHtml(draft.answerSchema.acceptableAnswers.join('\n'))}</textarea>
+        </label>
+        <label class="editor-field">
+          <span class="stat-label">Placeholder</span>
+          <input class="text-input" value="${escapeHtml(draft.answerSchema.placeholder ?? '')}" data-draft-field="structured-placeholder" />
+        </label>
+      `;
+    case 'derivation':
+      return `
+        <label class="editor-field full-span">
+          <span class="stat-label">Checklist</span>
+          <textarea class="text-area compact-area" data-draft-field="derivation-checklist">${escapeHtml(draft.answerSchema.checklist.join('\n'))}</textarea>
+        </label>
+      `;
+  }
+}
+
+function renderDraftCard(draft: GeneratedQuestionDraft): string {
+  return `
+    <article class="question-card draft-card" data-draft-card="${draft.id}">
+      <div class="question-top">
+        <div>
+          <h3 class="question-title">${escapeHtml(draft.title || 'Untitled draft')}</h3>
+          <div class="inline-stack">
+            <span class="badge">${escapeHtml(draft.selectionBucket)}</span>
+            <span class="badge">${escapeHtml(draft.promptType)}</span>
+            <span class="badge">${escapeHtml(draft.topicLabel)}</span>
+          </div>
+        </div>
+        <div class="inline-stack">
+          <button class="secondary" data-action="delete-draft" data-draft-id="${draft.id}">Delete</button>
+          <button class="primary" data-action="publish-draft" data-draft-id="${draft.id}" ${draft.validationIssues.length > 0 ? 'disabled' : ''}>Publish</button>
+        </div>
+      </div>
+      <div class="draft-editor-grid">
+        <label class="editor-field">
+          <span class="stat-label">Title</span>
+          <input class="text-input" value="${escapeHtml(draft.title)}" data-draft-field="title" />
+        </label>
+        <label class="editor-field">
+          <span class="stat-label">Source</span>
+          <input class="text-input" value="${escapeHtml(draft.source)}" data-draft-field="source" />
+        </label>
+        <label class="editor-field">
+          <span class="stat-label">Topic label</span>
+          <input class="text-input" value="${escapeHtml(draft.topicLabel)}" data-draft-field="topicLabel" />
+        </label>
+        <label class="editor-field">
+          <span class="stat-label">Topic ID</span>
+          <input class="text-input" value="${escapeHtml(draft.topicId)}" data-draft-field="topicId" />
+        </label>
+        <label class="editor-field">
+          <span class="stat-label">Difficulty</span>
+          <select class="text-input" data-draft-field="difficulty">
+            <option value="medium" ${draft.difficulty === 'medium' ? 'selected' : ''}>medium</option>
+            <option value="hard" ${draft.difficulty === 'hard' ? 'selected' : ''}>hard</option>
+          </select>
+        </label>
+        <label class="editor-field">
+          <span class="stat-label">Prompt type</span>
+          <select class="text-input" data-draft-field="promptType">
+            <option value="multiple_choice" ${draft.promptType === 'multiple_choice' ? 'selected' : ''}>multiple_choice</option>
+            <option value="numeric" ${draft.promptType === 'numeric' ? 'selected' : ''}>numeric</option>
+            <option value="structured" ${draft.promptType === 'structured' ? 'selected' : ''}>structured</option>
+            <option value="derivation" ${draft.promptType === 'derivation' ? 'selected' : ''}>derivation</option>
+          </select>
+        </label>
+        <label class="editor-field">
+          <span class="stat-label">Selection bucket</span>
+          <select class="text-input" data-draft-field="selectionBucket">
+            <option value="derivation" ${draft.selectionBucket === 'derivation' ? 'selected' : ''}>derivation</option>
+            <option value="backprop_auto" ${draft.selectionBucket === 'backprop_auto' ? 'selected' : ''}>backprop_auto</option>
+            <option value="cnn_auto" ${draft.selectionBucket === 'cnn_auto' ? 'selected' : ''}>cnn_auto</option>
+            <option value="concept" ${draft.selectionBucket === 'concept' ? 'selected' : ''}>concept</option>
+          </select>
+        </label>
+        <label class="editor-field full-span">
+          <span class="stat-label">Stem</span>
+          <textarea class="text-area compact-area" data-draft-field="stem">${escapeHtml(draft.stem)}</textarea>
+        </label>
+        <label class="editor-field full-span">
+          <span class="stat-label">Hint</span>
+          <textarea class="text-area compact-area" data-draft-field="hint">${escapeHtml(draft.hint ?? '')}</textarea>
+        </label>
+        <label class="editor-field full-span">
+          <span class="stat-label">Worked solution</span>
+          <textarea class="text-area compact-area" data-draft-field="workedSolution">${escapeHtml(draft.workedSolution)}</textarea>
+        </label>
+        ${renderDraftSchemaEditor(draft)}
+      </div>
+      <div class="feedback ${draft.validationIssues.length > 0 ? 'danger' : 'success'}">
+        <strong>Validation</strong>
+        ${renderDraftIssues(draft)}
+      </div>
+      <div class="citation-list">
+        ${draft.citations
+          .map(
+            (citation) => `
+              <div class="feedback">
+                <strong>${escapeHtml(citation.documentName)} • ${escapeHtml(citation.locatorLabel)}</strong>
+                ${citation.chunkId ? `<div class="small-copy">Resolved chunk: ${escapeHtml(citation.chunkId)}</div>` : '<div class="small-copy">Chunk unresolved</div>'}
+                <div class="small-copy">${escapeHtml(citation.excerpt)}</div>
+              </div>`
+          )
+          .join('')}
+      </div>
+      <div class="actions" style="margin-top: 16px;">
+        <button class="secondary" data-action="save-draft" data-draft-id="${draft.id}">Save changes</button>
+      </div>
+    </article>
+  `;
+}
+
+function renderDraftReviewSection(questionBankValue: QuestionBankView | null): string {
+  const batches = questionBankValue?.batches ?? [];
+  const drafts = questionBankValue?.drafts ?? [];
+  const draftGroups = batches
+    .map((batch) => ({
+      batch,
+      drafts: drafts.filter((draft) => draft.batchId === batch.id)
+    }))
+    .filter((group) => group.drafts.length > 0 || group.batch.status === 'generation_failed' || group.batch.status === 'running');
+
+  return `
+    <section class="card draft-review" data-section="dashboard-drafts">
+      <div class="question-top">
+        <div>
+          <h2 class="card-title">Draft batch review</h2>
+          <p class="subtle">Review, edit, publish, or discard generated questions before they enter the live bank.</p>
+        </div>
+      </div>
+      ${draftGroups.length === 0
+        ? '<p class="small-copy">No draft batches yet.</p>'
+        : draftGroups
+            .map(
+              ({ batch, drafts: batchDrafts }) => `
+                <section class="draft-batch">
+                  <div class="question-top">
+                    <div>
+                      <h3 class="question-title">Batch ${escapeHtml(batch.id)}</h3>
+                      <p class="small-copy">
+                        Requested ${batch.requestedDraftCount} drafts
+                        • mode ${escapeHtml(batch.generationMode)}
+                        • status ${escapeHtml(batch.status)}
+                        • requests ${batch.completedRequestCount}/${batch.totalRequestCount}
+                        • repaired ${batch.repairedDraftCount}
+                        ${batch.modelName ? ` • ${escapeHtml(batch.modelName)}` : ''}
+                      </p>
+                      ${batch.errorMessage ? `<p class="small-copy">${escapeHtml(batch.errorMessage)}</p>` : ''}
+                    </div>
+                    <div class="inline-stack">
+                      <button
+                        class="primary"
+                        data-action="publish-batch"
+                        data-batch-id="${batch.id}"
+                        ${batchDrafts.some((draft) => draft.validationIssues.length === 0) ? '' : 'disabled'}
+                      >
+                        Publish all valid
+                      </button>
+                      <button class="secondary" data-action="discard-batch" data-batch-id="${batch.id}">Discard batch</button>
+                    </div>
+                  </div>
+                  <div class="draft-list">
+                    ${batchDrafts.map((draft) => renderDraftCard(draft)).join('')}
+                  </div>
+                </section>`
+            )
+            .join('')}
     </section>
   `;
+}
+
+function renderPublishedLibrary(questionBankValue: QuestionBankView | null): string {
+  const activeQuestions = (questionBankValue?.publishedQuestions ?? []).filter((question) => !question.archivedAt);
+  return `
+    <article class="card" data-section="dashboard-published">
+      <h2 class="card-title">Published generated bank</h2>
+      ${activeQuestions.length === 0
+        ? '<p class="small-copy">No approved generated questions yet.</p>'
+        : `
+          <div class="summary-grid">
+            ${questionBankValue?.publishedSummary.byBucket
+              .map((entry) => `<div class="stat-box"><span class="stat-label">${escapeHtml(entry.label)}</span><span class="stat-value">${entry.count}</span></div>`)
+              .join('') ?? ''}
+          </div>
+          <div class="summary-grid">
+            ${questionBankValue?.publishedSummary.byTopic
+              .slice(0, 6)
+              .map((entry) => `<div class="stat-box"><span class="stat-label">${escapeHtml(entry.label)}</span><span class="stat-value">${entry.count}</span></div>`)
+              .join('') ?? ''}
+          </div>
+          <div class="published-list">
+            ${activeQuestions
+              .slice(0, 12)
+              .map(
+                (question) => `
+                  <div class="published-item">
+                    <div>
+                      <strong>${escapeHtml(question.title)}</strong>
+                      <div class="small-copy">${escapeHtml(question.topicLabel)} • ${escapeHtml(question.selectionBucket)}</div>
+                    </div>
+                    <button class="secondary" data-action="archive-published" data-published-id="${question.bankQuestionId}">Archive</button>
+                  </div>`
+              )
+              .join('')}
+          </div>`}
+    </article>
+  `;
+}
+
+function renderDashboard(snapshotValue: AppSnapshot, questionBankValue: QuestionBankView | null): string {
+  return `
+    <section class="grid" data-view="dashboard">
+      <div class="grid dashboard-grid">
+        <div class="grid">
+          ${renderDashboardHero(snapshotValue)}
+          ${renderDashboardSchedule(snapshotValue)}
+          ${renderDashboardHistory(snapshotValue)}
+          ${renderQuestionSourceCard(snapshotValue, questionBankValue)}
+          ${renderDocumentLibrary(questionBankValue)}
+        </div>
+
+        <div class="grid">
+          ${renderDashboardPressure(snapshotValue)}
+          ${renderDashboardEnforcement(snapshotValue)}
+          ${renderDashboardWeakTopics(snapshotValue)}
+          ${renderPublishedLibrary(questionBankValue)}
+          ${renderDashboardCoverage()}
+        </div>
+      </div>
+      ${renderDraftReviewSection(questionBankValue)}
+    </section>
+  `;
+}
+
+function findDraft(draftId: string): GeneratedQuestionDraft | undefined {
+  return questionBankView?.drafts.find((draft) => draft.id === draftId);
+}
+
+function collectDraftFields(draftId: string) {
+  const card = appElement?.querySelector<HTMLElement>(`[data-draft-card="${draftId}"]`);
+  const draft = findDraft(draftId);
+  if (!card || !draft) {
+    return null;
+  }
+
+  const readTextField = (fieldName: string): string =>
+    (card.querySelector<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>(`[data-draft-field="${fieldName}"]`)?.value ?? '').trim();
+
+  const promptType = readTextField('promptType') as PromptType;
+  let answerSchema: AnswerSchema;
+  if (promptType === 'multiple_choice') {
+    answerSchema = {
+      kind: 'multiple_choice',
+      options: readTextField('mc-options').split('\n').map((value) => value.trim()).filter(Boolean),
+      correctIndex: Number(readTextField('mc-correct-index'))
+    };
+  } else if (promptType === 'numeric') {
+    answerSchema = {
+      kind: 'numeric',
+      correctValue: Number(readTextField('numeric-correct-value')),
+      tolerance: Number(readTextField('numeric-tolerance')),
+      unitLabel: readTextField('numeric-unit-label') || undefined
+    };
+  } else if (promptType === 'structured') {
+    answerSchema = {
+      kind: 'structured',
+      acceptableAnswers: readTextField('structured-answers').split('\n').map((value) => value.trim()).filter(Boolean),
+      placeholder: readTextField('structured-placeholder') || undefined
+    };
+  } else {
+    answerSchema = {
+      kind: 'derivation',
+      checklist: readTextField('derivation-checklist').split('\n').map((value) => value.trim()).filter(Boolean)
+    };
+  }
+
+  return {
+    title: readTextField('title'),
+    source: readTextField('source'),
+    topicId: readTextField('topicId'),
+    topicLabel: readTextField('topicLabel'),
+    difficulty: readTextField('difficulty') as Difficulty,
+    promptType,
+    selectionBucket: readTextField('selectionBucket') as SelectionBucket,
+    stem: readTextField('stem'),
+    hint: readTextField('hint') || undefined,
+    workedSolution: readTextField('workedSolution'),
+    answerSchema,
+    citations: draft.citations
+  };
 }
 
 function renderFeedback(progress: QuestionProgress): string {
@@ -754,7 +1350,7 @@ function renderQuestionCard(question: Question): string {
           <h3 class="question-title">${escapeHtml(question.title)}</h3>
           <div class="inline-stack">
             <span class="source-chip badge">${escapeHtml(question.source)}</span>
-            <span class="badge">${escapeHtml(question.topicTag.replaceAll('_', ' '))}</span>
+            <span class="badge">${escapeHtml(question.topicLabel || question.topicTag.replaceAll('_', ' '))}</span>
             ${headerBadge}
           </div>
         </div>
@@ -835,7 +1431,7 @@ function renderPractice(snapshotValue: AppSnapshot): string {
 
 function updateDashboardView(previousSnapshot: AppSnapshot, nextSnapshot: AppSnapshot): void {
   if (!appElement?.querySelector('[data-view="dashboard"]')) {
-    appElement!.innerHTML = renderDashboard(nextSnapshot);
+    appElement!.innerHTML = renderDashboard(nextSnapshot, questionBankView);
     return;
   }
 
@@ -863,6 +1459,9 @@ function updateDashboardView(previousSnapshot: AppSnapshot, nextSnapshot: AppSna
     || previousSnapshot.settings.lighterReopenDelayMinutes !== nextSnapshot.settings.lighterReopenDelayMinutes
   ) {
     replaceSection('dashboard-enforcement', renderDashboardEnforcement(nextSnapshot));
+  }
+  if (previousSnapshot.settings.questionSourceMode !== nextSnapshot.settings.questionSourceMode) {
+    replaceSection('dashboard-question-source', renderQuestionSourceCard(nextSnapshot, questionBankView));
   }
   if (JSON.stringify(previousSnapshot.weakTopics) !== JSON.stringify(nextSnapshot.weakTopics)) {
     replaceSection('dashboard-weak-topics', renderDashboardWeakTopics(nextSnapshot));
@@ -947,6 +1546,15 @@ async function refreshSnapshot(): Promise<void> {
   render();
 }
 
+async function refreshQuestionBank(): Promise<void> {
+  if (mode !== 'dashboard' || typeof window.calcTrainer.getQuestionBank !== 'function') {
+    return;
+  }
+  questionBankView = (await window.calcTrainer.getQuestionBank()) as QuestionBankView;
+  syncSelectedDocuments();
+  render();
+}
+
 function render(): void {
   if (!appElement || !clockElement) {
     return;
@@ -960,8 +1568,16 @@ function render(): void {
 
   const previousSnapshot = renderedSnapshot;
   if (!previousSnapshot) {
-    appElement.innerHTML = mode === 'practice' ? renderPractice(snapshot) : renderDashboard(snapshot);
+    appElement.innerHTML = mode === 'practice' ? renderPractice(snapshot) : renderDashboard(snapshot, questionBankView);
     renderedSnapshot = snapshot;
+    renderedQuestionBankView = questionBankView;
+    return;
+  }
+
+  if (mode === 'dashboard' && !questionBankContentEqual(renderedQuestionBankView, questionBankView)) {
+    appElement.innerHTML = renderDashboard(snapshot, questionBankView);
+    renderedSnapshot = snapshot;
+    renderedQuestionBankView = questionBankView;
     return;
   }
 
@@ -972,6 +1588,7 @@ function render(): void {
       updateDashboardLiveState();
     }
     renderedSnapshot = snapshot;
+    renderedQuestionBankView = questionBankView;
     return;
   }
 
@@ -981,6 +1598,7 @@ function render(): void {
     updateDashboardView(previousSnapshot, snapshot);
   }
   renderedSnapshot = snapshot;
+  renderedQuestionBankView = questionBankView;
 }
 
 function tickView(): void {
@@ -1011,6 +1629,15 @@ appElement?.addEventListener('input', (event) => {
 appElement?.addEventListener('change', (event) => {
   const target = event.target;
   if (!(target instanceof HTMLInputElement)) {
+    return;
+  }
+  const documentId = target.dataset.documentId;
+  if (documentId) {
+    if (target.checked) {
+      selectedDocumentIds.add(documentId);
+    } else {
+      selectedDocumentIds.delete(documentId);
+    }
     return;
   }
   const questionId = target.dataset.questionId;
@@ -1050,6 +1677,7 @@ appElement?.addEventListener('click', async (event) => {
 
   if (action === 'refresh-dashboard') {
     await refreshSnapshot();
+    await refreshQuestionBank();
     setBanner('State refreshed from the main process.');
     return;
   }
@@ -1064,6 +1692,16 @@ appElement?.addEventListener('click', async (event) => {
     return;
   }
 
+  if (action === 'set-question-source') {
+    const questionSourceMode = button.dataset.sourceMode as QuestionSourceMode | undefined;
+    if (!questionSourceMode || snapshot.settings.questionSourceMode === questionSourceMode) {
+      return;
+    }
+    applySnapshot(await window.calcTrainer.updateSettings({ questionSourceMode }) as AppSnapshot);
+    setBanner(`Question source set to ${questionSourceMode}.`);
+    return;
+  }
+
   if (action === 'save-lighter-delay') {
     const delayInput = appElement?.querySelector<HTMLInputElement>('[data-setting-field="lighter-reopen-delay"]');
     const lighterReopenDelayMinutes = Number(delayInput?.value ?? '');
@@ -1073,6 +1711,91 @@ appElement?.addEventListener('click', async (event) => {
     }
     applySnapshot(await window.calcTrainer.updateSettings({ lighterReopenDelayMinutes }) as AppSnapshot);
     setBanner(`Lighter reopen delay set to ${snapshot.settings.lighterReopenDelayMinutes} minute${snapshot.settings.lighterReopenDelayMinutes === 1 ? '' : 's'}.`);
+    return;
+  }
+
+  if (action === 'import-documents') {
+    applyQuestionBankResult(await window.calcTrainer.importDocuments() as QuestionBankMutationResult);
+    return;
+  }
+
+  if (action === 'generate-drafts') {
+    applyQuestionBankResult(
+      await window.calcTrainer.generateDraftBatch({
+        documentIds: [...selectedDocumentIds]
+      }) as QuestionBankMutationResult
+    );
+    return;
+  }
+
+  if (action === 'save-draft') {
+    const draftId = button.dataset.draftId;
+    if (!draftId) {
+      return;
+    }
+    const fields = collectDraftFields(draftId);
+    if (!fields) {
+      setBanner('Draft form is unavailable.');
+      return;
+    }
+    applyQuestionBankResult(
+      await window.calcTrainer.updateDraft({
+        draftId,
+        fields
+      }) as QuestionBankMutationResult
+    );
+    return;
+  }
+
+  if (action === 'delete-draft') {
+    const draftId = button.dataset.draftId;
+    if (!draftId) {
+      return;
+    }
+    applyQuestionBankResult(await window.calcTrainer.deleteDraft({ draftId }) as QuestionBankMutationResult);
+    return;
+  }
+
+  if (action === 'publish-draft') {
+    const draftId = button.dataset.draftId;
+    if (!draftId) {
+      return;
+    }
+    applyQuestionBankResult(await window.calcTrainer.publishDrafts({ draftIds: [draftId] }) as QuestionBankMutationResult);
+    return;
+  }
+
+  if (action === 'publish-batch') {
+    const batchId = button.dataset.batchId;
+    if (!batchId || !questionBankView) {
+      return;
+    }
+    const validDraftIds = questionBankView.drafts
+      .filter((draft) => draft.batchId === batchId && draft.validationIssues.length === 0)
+      .map((draft) => draft.id);
+    if (validDraftIds.length === 0) {
+      setBanner('No valid drafts remain in this batch.');
+      return;
+    }
+    applyQuestionBankResult(await window.calcTrainer.publishDrafts({ draftIds: validDraftIds }) as QuestionBankMutationResult);
+    return;
+  }
+
+  if (action === 'discard-batch') {
+    const batchId = button.dataset.batchId;
+    if (!batchId) {
+      return;
+    }
+    applyQuestionBankResult(await window.calcTrainer.deleteDraft({ batchId }) as QuestionBankMutationResult);
+    return;
+  }
+
+  if (action === 'archive-published') {
+    const questionId = button.dataset.publishedId;
+    if (!questionId) {
+      return;
+    }
+    applyQuestionBankResult(await window.calcTrainer.archivePublished({ questionIds: [questionId] }) as QuestionBankMutationResult);
     return;
   }
 
@@ -1141,4 +1864,7 @@ window.calcTrainer.onSnapshot((nextSnapshot) => {
 
 setupPracticeWindowCloseInterceptor();
 void refreshSnapshot();
+if (mode === 'dashboard') {
+  void refreshQuestionBank();
+}
 window.setInterval(() => tickView(), 1000);

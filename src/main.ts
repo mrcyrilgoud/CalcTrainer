@@ -1,6 +1,6 @@
 import path from 'node:path';
 
-import { app, BrowserWindow, ipcMain, Notification, shell } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, Notification, shell, type OpenDialogOptions } from 'electron';
 
 import {
   getActiveReminderRepeatMs,
@@ -11,6 +11,20 @@ import {
   shouldActivatePracticePrompt,
   shouldKeepPracticeWindowOnTop
 } from './shared/settings';
+import {
+  archivePublishedQuestions,
+  buildQuestionBankView,
+  buildTopicLabelMap,
+  createDefaultQuestionBankState,
+  deleteDraftFromQuestionBank,
+  generateDraftBatch,
+  getQuestionBankFilePath as resolveQuestionBankFilePath,
+  importQuestionBankFiles,
+  loadQuestionBankFile,
+  publishDraftsInQuestionBank,
+  saveQuestionBankFile,
+  updateDraftInQuestionBank
+} from './shared/question-bank-storage';
 import { buildSnapshot, slimDownSnapshot, SnapshotPayloadStyle } from './shared/selectors';
 import { queueDueSessions } from './shared/schedule';
 import {
@@ -23,11 +37,12 @@ import {
   submitAnswer
 } from './shared/practice';
 import { createDefaultState, loadStateFile, saveStateFile } from './shared/storage';
-import { AppSettings, AppSnapshot, AppState, SelfCheckRating } from './shared/types';
+import { AppSettings, AppSnapshot, AppState, DraftQuestionFields, QuestionBankState, SelfCheckRating } from './shared/types';
 
 let dashboardWindow: BrowserWindow | null = null;
 let practiceWindow: BrowserWindow | null = null;
 let appState: AppState = createDefaultState();
+let questionBankState: QuestionBankState = createDefaultQuestionBankState();
 let isQuitting = false;
 let reopenTimer: NodeJS.Timeout | null = null;
 let reminderInterval: NodeJS.Timeout | null = null;
@@ -40,6 +55,10 @@ if (userDataOverride) {
 
 function getStateFilePath(): string {
   return path.join(app.getPath('userData'), 'calc-trainer-state.json');
+}
+
+function getQuestionBankStateFilePath(): string {
+  return resolveQuestionBankFilePath(app.getPath('userData'));
 }
 
 function getRendererPath(): string {
@@ -55,7 +74,9 @@ function snapshotStyleForWebContents(webContentsId: number): SnapshotPayloadStyl
 }
 
 function buildSnapshotNowForWebContents(webContentsId: number): AppSnapshot {
-  return buildSnapshot(appState, new Date(), snapshotStyleForWebContents(webContentsId));
+  return buildSnapshot(appState, new Date(), snapshotStyleForWebContents(webContentsId), {
+    topicLabels: buildTopicLabelMap(questionBankState)
+  });
 }
 
 function getSettings(): AppSettings {
@@ -70,8 +91,18 @@ function persistStateIfChanged(previousState: AppState, options: { skipWebConten
   broadcastSnapshot(options);
 }
 
+function persistQuestionBankIfChanged(previousState: QuestionBankState, options: { skipWebContentsId?: number } = {}): void {
+  if (previousState === questionBankState) {
+    return;
+  }
+  saveQuestionBankFile(getQuestionBankStateFilePath(), questionBankState);
+  broadcastSnapshot(options);
+}
+
 function broadcastSnapshot(options: { skipWebContentsId?: number } = {}): void {
-  const fullSnapshot = buildSnapshot(appState, new Date(), 'full');
+  const fullSnapshot = buildSnapshot(appState, new Date(), 'full', {
+    topicLabels: buildTopicLabelMap(questionBankState)
+  });
   const slimSnapshot = slimDownSnapshot(fullSnapshot);
   for (const candidate of [dashboardWindow, practiceWindow]) {
     if (candidate && !candidate.isDestroyed() && candidate.webContents.id !== options.skipWebContentsId) {
@@ -240,7 +271,7 @@ function runScheduler(): void {
   const now = new Date();
   const previousState = appState;
   const previousActiveSessionId = previousState.activeSessionId;
-  const queueResult = queueDueSessions(appState, now);
+  const queueResult = queueDueSessions(appState, now, questionBankState);
   appState = queueResult.state;
   persistStateIfChanged(previousState);
 
@@ -263,8 +294,17 @@ function runScheduler(): void {
   }
 }
 
+function buildQuestionBankResult(message: string, ok = true) {
+  return {
+    ok,
+    message,
+    view: buildQuestionBankView(questionBankState)
+  };
+}
+
 function registerIpc(): void {
   ipcMain.handle('snapshot:get', (event) => buildSnapshotNowForWebContents(event.sender.id));
+  ipcMain.handle('questionBank:get', () => buildQuestionBankView(questionBankState));
   ipcMain.handle('dashboard:open', async (event) => {
     await createDashboardWindow();
     return buildSnapshotNowForWebContents(event.sender.id);
@@ -281,7 +321,7 @@ function registerIpc(): void {
     'settings:update',
     (
       event,
-      payload: Partial<Pick<AppSettings, 'enforcementStyle' | 'lighterReopenDelayMinutes'>>
+      payload: Partial<Pick<AppSettings, 'enforcementStyle' | 'lighterReopenDelayMinutes' | 'questionSourceMode'>>
     ) => {
       const nextSettings = sanitizeSettings({
         ...appState.settings,
@@ -305,6 +345,112 @@ function registerIpc(): void {
       return buildSnapshotNowForWebContents(event.sender.id);
     }
   );
+  ipcMain.handle('questionBank:importDocuments', async (event) => {
+    const ownerWindow = BrowserWindow.fromWebContents(event.sender) ?? dashboardWindow ?? undefined;
+    const dialogOptions: OpenDialogOptions = {
+      properties: ['openFile', 'multiSelections'],
+      filters: [
+        {
+          name: 'Supported documents',
+          extensions: ['pdf', 'pptx']
+        }
+      ]
+    };
+    const selected = ownerWindow
+      ? await dialog.showOpenDialog(ownerWindow, dialogOptions)
+      : await dialog.showOpenDialog(dialogOptions);
+    if (selected.canceled || selected.filePaths.length === 0) {
+      return buildQuestionBankResult('Document import cancelled.', false);
+    }
+
+    const previousQuestionBankState = questionBankState;
+    const importResult = await importQuestionBankFiles(questionBankState, selected.filePaths, app.getPath('userData'), new Date());
+    questionBankState = importResult.state;
+    persistQuestionBankIfChanged(previousQuestionBankState, { skipWebContentsId: event.sender.id });
+
+    const messages = [`Imported ${importResult.importedCount} document${importResult.importedCount === 1 ? '' : 's'}.`];
+    if (importResult.duplicateFiles.length > 0) {
+      messages.push(`Skipped duplicates: ${importResult.duplicateFiles.join(', ')}.`);
+    }
+    if (importResult.unsupportedFiles.length > 0) {
+      messages.push(`Unsupported files: ${importResult.unsupportedFiles.join(', ')}.`);
+    }
+    if (importResult.extractionFailures.length > 0) {
+      messages.push(`Extraction failed for: ${importResult.extractionFailures.join(', ')}.`);
+    }
+    return buildQuestionBankResult(messages.join(' '), true);
+  });
+  ipcMain.handle('questionBank:generateDraftBatch', async (event, payload: { documentIds: string[] }) => {
+    const result = await generateDraftBatch(
+      questionBankState,
+      app.getPath('userData'),
+      payload.documentIds ?? [],
+      new Date(),
+      {
+        onStateChange: (nextState) => {
+          const previousQuestionBankState = questionBankState;
+          questionBankState = nextState;
+          persistQuestionBankIfChanged(previousQuestionBankState, { skipWebContentsId: event.sender.id });
+        }
+      }
+    );
+    if (questionBankState !== result.state) {
+      const previousQuestionBankState = questionBankState;
+      questionBankState = result.state;
+      persistQuestionBankIfChanged(previousQuestionBankState, { skipWebContentsId: event.sender.id });
+    }
+    return buildQuestionBankResult(
+      result.message
+        ?? `Generated ${result.generatedCount} draft question${result.generatedCount === 1 ? '' : 's'} in batch ${result.batchId || 'n/a'}.`,
+      result.status !== 'generation_failed'
+    );
+  });
+  ipcMain.handle('questionBank:updateDraft', (event, payload: { draftId: string; fields: Partial<DraftQuestionFields> }) => {
+    const previousQuestionBankState = questionBankState;
+    const result = updateDraftInQuestionBank(
+      questionBankState,
+      payload.draftId,
+      payload.fields ?? {},
+      app.getPath('userData'),
+      new Date()
+    );
+    questionBankState = result.state;
+    persistQuestionBankIfChanged(previousQuestionBankState, { skipWebContentsId: event.sender.id });
+    return buildQuestionBankResult(
+      result.issues.length > 0
+        ? `Draft saved with ${result.issues.length} validation issue${result.issues.length === 1 ? '' : 's'}.`
+        : 'Draft saved.',
+      result.updated
+    );
+  });
+  ipcMain.handle('questionBank:deleteDraft', (event, payload: { draftId?: string; batchId?: string }) => {
+    const previousQuestionBankState = questionBankState;
+    const result = deleteDraftFromQuestionBank(questionBankState, payload ?? {}, new Date());
+    questionBankState = result.state;
+    persistQuestionBankIfChanged(previousQuestionBankState, { skipWebContentsId: event.sender.id });
+    return buildQuestionBankResult(`Removed ${result.deletedCount} draft question${result.deletedCount === 1 ? '' : 's'}.`, result.deletedCount > 0);
+  });
+  ipcMain.handle('questionBank:publishDrafts', (event, payload: { draftIds: string[] }) => {
+    const previousQuestionBankState = questionBankState;
+    const result = publishDraftsInQuestionBank(questionBankState, payload.draftIds ?? [], new Date());
+    questionBankState = result.state;
+    persistQuestionBankIfChanged(previousQuestionBankState, { skipWebContentsId: event.sender.id });
+    const skippedSuffix = result.skippedCount > 0 ? ` ${result.skippedCount} invalid draft${result.skippedCount === 1 ? '' : 's'} were skipped.` : '';
+    return buildQuestionBankResult(
+      `Published ${result.publishedCount} question${result.publishedCount === 1 ? '' : 's'}.${skippedSuffix}`,
+      result.publishedCount > 0
+    );
+  });
+  ipcMain.handle('questionBank:archivePublished', (event, payload: { questionIds: string[] }) => {
+    const previousQuestionBankState = questionBankState;
+    const result = archivePublishedQuestions(questionBankState, payload.questionIds ?? [], new Date());
+    questionBankState = result.state;
+    persistQuestionBankIfChanged(previousQuestionBankState, { skipWebContentsId: event.sender.id });
+    return buildQuestionBankResult(
+      `Archived ${result.archivedCount} published question${result.archivedCount === 1 ? '' : 's'}.`,
+      result.archivedCount > 0
+    );
+  });
   ipcMain.handle('session:submit-answer', (event, payload: { sessionId: string; questionId: string; answerText: string }) => {
     const previousState = appState;
     const result = submitAnswer(appState, payload.sessionId, payload.questionId, payload.answerText, new Date());
@@ -350,6 +496,7 @@ async function bootstrap(): Promise<void> {
     app.setLoginItemSettings({ openAtLogin: true, openAsHidden: true });
   }
   appState = loadStateFile(getStateFilePath());
+  questionBankState = loadQuestionBankFile(getQuestionBankStateFilePath());
   registerIpc();
   const loginItemSettings = shouldRegisterLoginItem ? app.getLoginItemSettings() : null;
   const launchedAtLogin = Boolean(loginItemSettings?.wasOpenedAtLogin || loginItemSettings?.wasOpenedAsHidden);

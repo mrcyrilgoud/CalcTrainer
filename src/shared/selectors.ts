@@ -1,17 +1,7 @@
 import { getActiveSession, getActiveSessionStatus } from './practice';
 import { getPendingSessionCount, getTodayScheduleView } from './schedule';
-import { AppSnapshot, AppState, HistoryPoint, TopicScore, TopicTag } from './types';
+import { AppSnapshot, AppState, HistoryPoint, SEEDED_TOPIC_LABELS, TopicScore } from './types';
 import { buildLocalDate, formatDateLabel, formatDuration, formatTimeLabel, parseSlotId, toDateKey } from './time';
-
-const TOPIC_LABELS: Record<TopicTag, string> = {
-  binary_bce_backprop: 'Binary BCE backprop',
-  sigmoid_tanh_relu_derivatives: 'Activation derivatives',
-  multiclass_softmax_cross_entropy: 'Softmax backprop',
-  learning_rate_and_optimizer: 'Learning rate and optimizers',
-  conv_output_size: 'Convolution output size',
-  padding_stride_pooling: 'Padding, stride, and pooling',
-  conv_parameter_count: 'Convolution parameter count'
-};
 
 function buildHistory(state: AppState, now: Date): HistoryPoint[] {
   const days: HistoryPoint[] = [];
@@ -30,13 +20,15 @@ function buildHistory(state: AppState, now: Date): HistoryPoint[] {
   return days;
 }
 
-function buildWeakTopics(state: AppState): TopicScore[] {
+function buildWeakTopics(state: AppState, topicLabels: Record<string, string>): TopicScore[] {
   return Object.entries(state.weakTopicScores)
     .map(([topicTag, score]) => ({
-      topicTag: topicTag as TopicTag,
-      label: TOPIC_LABELS[topicTag as TopicTag],
+      topicId: topicTag,
+      topicTag,
+      label: topicLabels[topicTag] ?? topicTag.replace(/_/g, ' '),
       score
     }))
+    .filter((topic) => topic.score > 0)
     .sort((left, right) => right.score - left.score)
     .slice(0, 5);
 }
@@ -58,7 +50,12 @@ function computeStreakDays(history: HistoryPoint[]): number {
 
 export type SnapshotPayloadStyle = 'full' | 'slim';
 
-export function buildSnapshot(state: AppState, now: Date, style: SnapshotPayloadStyle = 'full'): AppSnapshot {
+export function buildSnapshot(
+  state: AppState,
+  now: Date,
+  style: SnapshotPayloadStyle = 'full',
+  options: { topicLabels?: Record<string, string> } = {}
+): AppSnapshot {
   const activeSessionFull = getActiveSession(state);
   const activeSession =
     style === 'slim' && activeSessionFull
@@ -67,6 +64,10 @@ export function buildSnapshot(state: AppState, now: Date, style: SnapshotPayload
   const history = buildHistory(state, now);
   const activeSessionStatus = activeSessionFull ? getActiveSessionStatus(activeSessionFull, now) : null;
   const completedToday = history[history.length - 1]?.completed ?? 0;
+  const topicLabels = {
+    ...SEEDED_TOPIC_LABELS,
+    ...(options.topicLabels ?? {})
+  };
 
   let overdueSummary: string | null = null;
   if (activeSessionFull) {
@@ -80,7 +81,7 @@ export function buildSnapshot(state: AppState, now: Date, style: SnapshotPayload
     activeSession,
     activeSessionStatus,
     schedule: getTodayScheduleView(state, now),
-    weakTopics: buildWeakTopics(state),
+    weakTopics: buildWeakTopics(state, topicLabels),
     history,
     streakDays: computeStreakDays(history),
     completedToday,

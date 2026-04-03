@@ -5,6 +5,7 @@ import {
   AppState,
   AttemptEvaluation,
   PracticeSession,
+  QuestionBankState,
   Question,
   QuestionProgress,
   SelfCheckRating
@@ -75,9 +76,14 @@ export function getActiveSession(state: AppState): PracticeSession | null {
   return state.sessions.find((session) => session.id === state.activeSessionId) ?? null;
 }
 
-export function createPracticeSession(state: AppState, slotId: string, scheduledFor: string): PracticeSession {
+export function createPracticeSession(
+  state: AppState,
+  slotId: string,
+  scheduledFor: string,
+  questionBankState?: QuestionBankState
+): PracticeSession {
   const settings = state.settings ?? createDefaultSettings();
-  const questions = generateQuestionsForSession(state, slotId);
+  const questions = generateQuestionsForSession(state, slotId, questionBankState);
   const responses = Object.fromEntries(questions.map((question) => [question.id, {}]));
   return {
     id: slotId,
@@ -239,7 +245,8 @@ export function submitAnswer(
   const evaluation = evaluateAnswer(question, answerText, now);
   const previousSignal = getProgressWeakSignal(previousProgress);
   const nextSignal = evaluation.weakTopicSignal;
-  const nextScore = Math.max(0, (state.weakTopicScores[question.topicTag] ?? 0) - previousSignal + nextSignal);
+  const weakTopicKey = question.topicId ?? question.topicTag;
+  const nextScore = Math.max(0, (state.weakTopicScores[weakTopicKey] ?? 0) - previousSignal + nextSignal);
 
   const updatedSession: PracticeSession = {
     ...session,
@@ -255,13 +262,13 @@ export function submitAnswer(
   };
 
   const nextStateBase = replaceSession(state, sessionIndex, updatedSession);
-  const nextState = nextScore === (state.weakTopicScores[question.topicTag] ?? 0)
+  const nextState = nextScore === (state.weakTopicScores[weakTopicKey] ?? 0)
     ? nextStateBase
     : {
         ...nextStateBase,
         weakTopicScores: {
           ...state.weakTopicScores,
-          [question.topicTag]: nextScore
+          [weakTopicKey]: nextScore
         }
       };
 
@@ -335,7 +342,8 @@ export function recordSelfCheck(
 
   const previousSignal = getProgressWeakSignal(previousProgress);
   const nextSignal = weakSignalFromSelfCheck(rating);
-  const nextScore = Math.max(0, (state.weakTopicScores[question.topicTag] ?? 0) - previousSignal + nextSignal);
+  const weakTopicKey = question.topicId ?? question.topicTag;
+  const nextScore = Math.max(0, (state.weakTopicScores[weakTopicKey] ?? 0) - previousSignal + nextSignal);
 
   const updatedSession: PracticeSession = {
     ...session,
@@ -348,13 +356,13 @@ export function recordSelfCheck(
     }
   };
   const nextStateBase = replaceSession(state, sessionIndex, updatedSession);
-  return nextScore === (state.weakTopicScores[question.topicTag] ?? 0)
+  return nextScore === (state.weakTopicScores[weakTopicKey] ?? 0)
     ? nextStateBase
     : {
         ...nextStateBase,
         weakTopicScores: {
           ...state.weakTopicScores,
-          [question.topicTag]: nextScore
+          [weakTopicKey]: nextScore
         }
       };
 }
