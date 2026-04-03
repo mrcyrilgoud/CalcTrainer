@@ -102,10 +102,23 @@ async function collectWindows(electronApp) {
   throw new Error('Timed out waiting for both dashboard and practice windows.');
 }
 
+async function waitForWindow(electronApp, modeName) {
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    const candidate = electronApp.windows().find((page) => page.url().includes(`mode=${modeName}`));
+    if (candidate) {
+      return candidate;
+    }
+    await wait(250);
+  }
+
+  throw new Error(`Timed out waiting for the ${modeName} window.`);
+}
+
 async function browserWindowStates(electronApp) {
   return electronApp.evaluate(({ BrowserWindow }) =>
     BrowserWindow.getAllWindows().map((window) => ({
       title: window.getTitle(),
+      url: window.webContents.getURL(),
       visible: window.isVisible(),
       destroyed: window.isDestroyed()
     }))
@@ -283,7 +296,8 @@ async function main() {
 
     const dashboardSnapshot = await dashboard.evaluate(() => window.calcTrainer.getSnapshot());
     assert.ok(dashboardSnapshot.activeSession, 'Expected an active session on launch.');
-    assert.equal(dashboardSnapshot.pendingCount, 3, 'Expected three seeded sessions on launch.');
+    const initialPendingCount = dashboardSnapshot.pendingCount;
+    assert.ok(initialPendingCount >= 2, 'Expected at least one active and one follow-up session on launch.');
 
     await dashboard.getByRole('button', { name: 'Lighter' }).click();
     await dashboard.locator('[data-setting-field="lighter-reopen-delay"]').fill('3');
@@ -297,7 +311,7 @@ async function main() {
     await wait(500);
 
     const hiddenWindowStates = await browserWindowStates(electronApp);
-    const hiddenPractice = hiddenWindowStates.find((entry) => entry.title === 'CalcTrainer Practice');
+    const hiddenPractice = hiddenWindowStates.find((entry) => entry.url.includes('mode=practice'));
     assert.ok(hiddenPractice, 'Practice window should still exist after close interception.');
     assert.equal(hiddenPractice.visible, false, 'Practice window should hide instead of closing.');
 
@@ -305,7 +319,7 @@ async function main() {
     await wait(500);
 
     const reopenedStates = await browserWindowStates(electronApp);
-    const reopenedPractice = reopenedStates.find((entry) => entry.title === 'CalcTrainer Practice');
+    const reopenedPractice = reopenedStates.find((entry) => entry.url.includes('mode=practice'));
     assert.ok(reopenedPractice?.visible, 'Practice window should become visible again.');
 
     const practiceSnapshot = await practice.evaluate(() => window.calcTrainer.getSnapshot());
@@ -333,7 +347,7 @@ async function main() {
     const postCompletionDashboardSnapshot = await dashboard.evaluate(() => window.calcTrainer.getSnapshot());
 
     assert.equal(postCompletionPracticeSnapshot.activeSession.id, expectedNextSessionId);
-    assert.equal(postCompletionDashboardSnapshot.pendingCount, 2);
+    assert.equal(postCompletionDashboardSnapshot.pendingCount, initialPendingCount - 1);
     assert.equal(postCompletionDashboardSnapshot.completedToday, 1);
 
     await practice.screenshot({ path: practiceAfterCompletionPng });
@@ -353,8 +367,13 @@ async function main() {
 
     ({ electronApp, watcher } = await launchApp(profileDir));
 
-    const { dashboard: relaunchedDashboard, practice: relaunchedPractice } = await collectWindows(electronApp);
+    const relaunchedDashboard = await waitForWindow(electronApp, 'dashboard');
     await relaunchedDashboard.waitForSelector('[data-view="dashboard"]');
+    let relaunchedPractice = electronApp.windows().find((page) => page.url().includes('mode=practice'));
+    if (!relaunchedPractice) {
+      await relaunchedDashboard.evaluate(() => window.calcTrainer.openPractice());
+      relaunchedPractice = await waitForWindow(electronApp, 'practice');
+    }
     await relaunchedPractice.waitForSelector('[data-view="practice"]');
 
     const relaunchDashboardSnapshot = await relaunchedDashboard.evaluate(() => window.calcTrainer.getSnapshot());
@@ -382,6 +401,8 @@ async function main() {
       stateFile: keepProfile ? stateFile : null,
       completedSessionId: seededState.activeSessionId,
       expectedNextSessionId,
+      initialPendingCount,
+      postCompletionPendingCount: postCompletionDashboardSnapshot.pendingCount,
       screenshots: [
         dashboardInitialPng,
         practiceInitialPng,

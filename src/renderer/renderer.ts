@@ -653,6 +653,13 @@ function replaceSection(sectionName: string, html: string): void {
   current.replaceWith(createElementFromHtml<HTMLElement>(html));
 }
 
+function refreshDocumentLibrarySection(): void {
+  if (mode !== 'dashboard' || !questionBankView) {
+    return;
+  }
+  replaceSection('dashboard-documents', renderDocumentLibrary(questionBankView));
+}
+
 function updateBannerRegions(): void {
   if (!appElement) {
     return;
@@ -1638,6 +1645,7 @@ appElement?.addEventListener('change', (event) => {
     } else {
       selectedDocumentIds.delete(documentId);
     }
+    refreshDocumentLibrarySection();
     return;
   }
   const questionId = target.dataset.questionId;
