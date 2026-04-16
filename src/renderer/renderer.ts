@@ -1067,6 +1067,9 @@ function updateQuestionBankSections(previousView: QuestionBankView | null, nextV
     || !sameDocuments(previousView.documents, nextView.documents)
     || previousView.proxyStatus.message !== nextView.proxyStatus.message
     || previousView.proxyStatus.configured !== nextView.proxyStatus.configured
+    || previousView.proxyStatus.baseUrl !== nextView.proxyStatus.baseUrl
+    || previousView.proxyStatus.model !== nextView.proxyStatus.model
+    || previousView.proxyStatus.parseMode !== nextView.proxyStatus.parseMode
   ) {
     replaceSection('dashboard-documents', renderDocumentLibrary(nextView));
   }
