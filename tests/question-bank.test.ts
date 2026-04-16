@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import JSZip from 'jszip';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   buildQuestionBankView,
@@ -12,7 +12,8 @@ import {
   getExtractedTextDir,
   getManagedDocumentsDir,
   importQuestionBankFiles,
-  publishDraftsInQuestionBank
+  publishDraftsInQuestionBank,
+  resetProxyMetadataCacheForTests
 } from '../src/shared/question-bank-storage';
 import { submitAnswer } from '../src/shared/practice';
 import { queueDueSessions } from '../src/shared/schedule';
@@ -171,6 +172,10 @@ function makeReadyDocumentState(userDataDir: string) {
 }
 
 describe('question bank pipeline', () => {
+  beforeEach(() => {
+    resetProxyMetadataCacheForTests();
+  });
+
   it('imports PDF and PPTX documents, extracts ordered text, deduplicates files, and rejects unsupported files', async () => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'calctrainer-bank-'));
     const userDataDir = path.join(tempDir, 'user-data');
@@ -597,6 +602,110 @@ describe('question bank pipeline', () => {
       expect(fetchMock).toHaveBeenCalledTimes(2);
       expect(fetchMock.mock.calls[0]?.[0]).toBe('http://proxy.test/api/tools');
       expect(fetchMock.mock.calls[1]?.[0]).toBe('http://proxy.test/responses');
+    } finally {
+      global.fetch = originalFetch;
+      if (previousEnv.baseUrl === undefined) {
+        delete process.env.CALCTRAINER_AI_PROXY_BASE_URL;
+      } else {
+        process.env.CALCTRAINER_AI_PROXY_BASE_URL = previousEnv.baseUrl;
+      }
+      if (previousEnv.model === undefined) {
+        delete process.env.CALCTRAINER_AI_PROXY_MODEL;
+      } else {
+        process.env.CALCTRAINER_AI_PROXY_MODEL = previousEnv.model;
+      }
+      if (previousEnv.tool === undefined) {
+        delete process.env.CALCTRAINER_AI_PROXY_TOOL;
+      } else {
+        process.env.CALCTRAINER_AI_PROXY_TOOL = previousEnv.tool;
+      }
+      if (previousEnv.parseMode === undefined) {
+        delete process.env.CALCTRAINER_AI_PROXY_PARSE_MODE;
+      } else {
+        process.env.CALCTRAINER_AI_PROXY_PARSE_MODE = previousEnv.parseMode;
+      }
+    }
+  });
+
+  it('reuses cached /api/tools metadata across consecutive raw-file generations', async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'calctrainer-proxy-tools-cache-'));
+    const userDataDir = path.join(tempDir, 'user-data');
+    const { state, documentId } = makeReadyDocumentState(userDataDir);
+
+    const previousEnv = {
+      baseUrl: process.env.CALCTRAINER_AI_PROXY_BASE_URL,
+      model: process.env.CALCTRAINER_AI_PROXY_MODEL,
+      tool: process.env.CALCTRAINER_AI_PROXY_TOOL,
+      parseMode: process.env.CALCTRAINER_AI_PROXY_PARSE_MODE
+    };
+    const originalFetch = global.fetch;
+
+    process.env.CALCTRAINER_AI_PROXY_BASE_URL = 'http://proxy.test';
+    process.env.CALCTRAINER_AI_PROXY_MODEL = 'gpt-test';
+    delete process.env.CALCTRAINER_AI_PROXY_TOOL;
+    delete process.env.CALCTRAINER_AI_PROXY_PARSE_MODE;
+
+    let questionSeed = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      if (url === 'http://proxy.test/api/tools') {
+        return new Response(JSON.stringify({
+          defaultTool: 'codex',
+          tools: ['codex']
+        }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' }
+        });
+      }
+      if (url === 'http://proxy.test/api/low-level') {
+        const payload = JSON.parse(String(init?.body ?? '{}')) as { files?: string[] };
+        expect(payload.files?.[0]).toBe(path.join(getManagedDocumentsDir(userDataDir), 'doc-generated.pdf'));
+        questionSeed += 1;
+        return new Response(JSON.stringify({
+          response: JSON.stringify({
+            questions: Array.from({ length: 2 }, (_, index) => ({
+              title: `Cached tool question ${questionSeed}-${index + 1}`,
+              source: 'Lecture 4.pdf',
+              topicId: `cached_tool_topic_${questionSeed}_${index + 1}`,
+              topicLabel: `Cached tool topic ${questionSeed}-${index + 1}`,
+              difficulty: 'medium',
+              promptType: 'structured',
+              selectionBucket: 'backprop_auto',
+              stem: `State derivative ${questionSeed}-${index + 1}.`,
+              workedSolution: 'sigma(x) * (1 - sigma(x))',
+              answerSchema: {
+                kind: 'structured',
+                acceptableAnswers: ['sigma(x) * (1 - sigma(x))']
+              },
+              citations: [
+                {
+                  documentId,
+                  documentName: 'Lecture 4.pdf',
+                  locatorLabel: 'Page 1',
+                  pageNumber: 1,
+                  excerpt: 'Sigmoid derivative is sigma(x) * (1 - sigma(x)).'
+                }
+              ]
+            }))
+          })
+        }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' }
+        });
+      }
+      throw new Error(`Unexpected fetch URL: ${url}`);
+    });
+
+    global.fetch = fetchMock as typeof global.fetch;
+
+    try {
+      const firstResult = await generateDraftBatch(state, userDataDir, [documentId], new Date('2026-03-23T10:15:00.000Z'));
+      const secondResult = await generateDraftBatch(firstResult.state, userDataDir, [documentId], new Date('2026-03-23T10:30:00.000Z'));
+
+      expect(firstResult.status).toBe('drafts_ready');
+      expect(secondResult.status).toBe('drafts_ready');
+      const toolProbeCalls = fetchMock.mock.calls.filter((call) => call[0] === 'http://proxy.test/api/tools');
+      expect(toolProbeCalls).toHaveLength(1);
     } finally {
       global.fetch = originalFetch;
       if (previousEnv.baseUrl === undefined) {

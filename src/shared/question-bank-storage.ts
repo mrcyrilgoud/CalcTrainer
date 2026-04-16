@@ -41,7 +41,14 @@ const LOW_LEVEL_MAX_DRAFTS_PER_REQUEST = 2;
 const RAW_FILE_DRAFTS_PER_REQUEST = 2;
 const RESPONSES_GENERATION_TIMEOUT_MS = 60_000;
 const LOW_LEVEL_GENERATION_TIMEOUT_MS = 120_000;
-const LOW_LEVEL_TOOL_CACHE = new Map<string, string>();
+const LOW_LEVEL_METADATA_TTL_MS = 30_000;
+const LOW_LEVEL_METADATA_CACHE = new Map<string, { supported: boolean; resolvedTool: string; checkedAtMs: number }>();
+const LOW_LEVEL_METADATA_IN_FLIGHT = new Map<string, Promise<{ supported: boolean; resolvedTool: string; checkedAtMs: number }>>();
+
+export function resetProxyMetadataCacheForTests(): void {
+  LOW_LEVEL_METADATA_CACHE.clear();
+  LOW_LEVEL_METADATA_IN_FLIGHT.clear();
+}
 
 type ProxyConfig = {
   baseUrl: string;
@@ -1832,77 +1839,87 @@ async function generateQuestionPayloadsViaResponses(
   };
 }
 
-async function resolveLowLevelTool(proxyConfig: ProxyConfig, signal: AbortSignal): Promise<string> {
-  const cachedTool = LOW_LEVEL_TOOL_CACHE.get(proxyConfig.baseUrl);
-  if (cachedTool) {
-    return cachedTool;
+function parseToolMetadataResponse(body: { defaultTool?: unknown; tools?: unknown }, fallbackTool: string): string {
+  if (typeof body.defaultTool === 'string' && body.defaultTool.trim()) {
+    return body.defaultTool.trim();
+  }
+  if (Array.isArray(body.tools)) {
+    const firstTool = body.tools.find((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0);
+    if (firstTool) {
+      return firstTool.trim();
+    }
+  }
+  return fallbackTool;
+}
+
+async function probeLowLevelMetadata(proxyConfig: ProxyConfig, signal: AbortSignal): Promise<{ supported: boolean; resolvedTool: string; checkedAtMs: number }> {
+  const checkedAtMs = Date.now();
+  if (proxyConfig.parseMode === 'raw_files' || Boolean(process.env.CALCTRAINER_AI_PROXY_TOOL?.trim())) {
+    return {
+      supported: true,
+      resolvedTool: proxyConfig.tool,
+      checkedAtMs
+    };
   }
 
-  if (process.env.CALCTRAINER_AI_PROXY_TOOL?.trim()) {
-    LOW_LEVEL_TOOL_CACHE.set(proxyConfig.baseUrl, proxyConfig.tool);
-    return proxyConfig.tool;
+  const response = await fetch(`${proxyConfig.baseUrl}/api/tools`, {
+    method: 'GET',
+    headers: proxyConfig.headers,
+    signal
+  });
+  if (!response.ok) {
+    return {
+      supported: false,
+      resolvedTool: proxyConfig.tool,
+      checkedAtMs
+    };
+  }
+  const body = await response.json() as { defaultTool?: unknown; tools?: unknown };
+  return {
+    supported: true,
+    resolvedTool: parseToolMetadataResponse(body, proxyConfig.tool),
+    checkedAtMs
+  };
+}
+
+async function getLowLevelMetadata(proxyConfig: ProxyConfig, signal: AbortSignal): Promise<{ supported: boolean; resolvedTool: string; checkedAtMs: number }> {
+  const now = Date.now();
+  const cached = LOW_LEVEL_METADATA_CACHE.get(proxyConfig.baseUrl);
+  if (cached && (now - cached.checkedAtMs) < LOW_LEVEL_METADATA_TTL_MS) {
+    return cached;
   }
 
-  try {
-    const response = await fetch(`${proxyConfig.baseUrl}/api/tools`, {
-      method: 'GET',
-      headers: proxyConfig.headers,
-      signal
+  const existingRequest = LOW_LEVEL_METADATA_IN_FLIGHT.get(proxyConfig.baseUrl);
+  if (existingRequest) {
+    return existingRequest;
+  }
+
+  const request = probeLowLevelMetadata(proxyConfig, signal)
+    .catch(() => ({
+      supported: false,
+      resolvedTool: proxyConfig.tool,
+      checkedAtMs: Date.now()
+    }))
+    .then((metadata) => {
+      LOW_LEVEL_METADATA_CACHE.set(proxyConfig.baseUrl, metadata);
+      return metadata;
+    })
+    .finally(() => {
+      LOW_LEVEL_METADATA_IN_FLIGHT.delete(proxyConfig.baseUrl);
     });
-    if (!response.ok) {
-      return proxyConfig.tool;
-    }
 
-    const body = await response.json() as { defaultTool?: unknown; tools?: unknown };
-    if (typeof body.defaultTool === 'string' && body.defaultTool.trim()) {
-      const resolvedTool = body.defaultTool.trim();
-      LOW_LEVEL_TOOL_CACHE.set(proxyConfig.baseUrl, resolvedTool);
-      return resolvedTool;
-    }
-    if (Array.isArray(body.tools)) {
-      const fallbackTool = body.tools.find((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0);
-      if (fallbackTool) {
-        const resolvedTool = fallbackTool.trim();
-        LOW_LEVEL_TOOL_CACHE.set(proxyConfig.baseUrl, resolvedTool);
-        return resolvedTool;
-      }
-    }
-  } catch {
-    return proxyConfig.tool;
-  }
+  LOW_LEVEL_METADATA_IN_FLIGHT.set(proxyConfig.baseUrl, request);
+  return request;
+}
 
-  return proxyConfig.tool;
+async function resolveLowLevelTool(proxyConfig: ProxyConfig, signal: AbortSignal): Promise<string> {
+  const metadata = await getLowLevelMetadata(proxyConfig, signal);
+  return metadata.resolvedTool;
 }
 
 async function hasLowLevelCapability(proxyConfig: ProxyConfig, signal: AbortSignal): Promise<boolean> {
-  if (proxyConfig.parseMode === 'raw_files' || Boolean(process.env.CALCTRAINER_AI_PROXY_TOOL?.trim())) {
-    LOW_LEVEL_TOOL_CACHE.set(proxyConfig.baseUrl, proxyConfig.tool);
-    return true;
-  }
-
-  try {
-    const response = await fetch(`${proxyConfig.baseUrl}/api/tools`, {
-      method: 'GET',
-      headers: proxyConfig.headers,
-      signal
-    });
-    if (!response.ok) {
-      return false;
-    }
-
-    const body = await response.json() as { defaultTool?: unknown; tools?: unknown };
-    if (typeof body.defaultTool === 'string' && body.defaultTool.trim()) {
-      LOW_LEVEL_TOOL_CACHE.set(proxyConfig.baseUrl, body.defaultTool.trim());
-    } else if (Array.isArray(body.tools)) {
-      const fallbackTool = body.tools.find((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0);
-      if (fallbackTool) {
-        LOW_LEVEL_TOOL_CACHE.set(proxyConfig.baseUrl, fallbackTool.trim());
-      }
-    }
-    return true;
-  } catch {
-    return false;
-  }
+  const metadata = await getLowLevelMetadata(proxyConfig, signal);
+  return metadata.supported;
 }
 
 async function runLowLevelPrompt(

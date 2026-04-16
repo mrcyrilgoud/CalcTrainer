@@ -100,13 +100,28 @@ function persistQuestionBankIfChanged(previousState: QuestionBankState, options:
 }
 
 function broadcastSnapshot(options: { skipWebContentsId?: number } = {}): void {
-  const fullSnapshot = buildSnapshot(appState, new Date(), 'full', {
-    topicLabels: buildTopicLabelMap(questionBankState)
-  });
-  const slimSnapshot = slimDownSnapshot(fullSnapshot);
+  const now = new Date();
+  const topicLabels = buildTopicLabelMap(questionBankState);
+  let fullSnapshot: AppSnapshot | null = null;
+  let slimSnapshot: AppSnapshot | null = null;
+
+  const getFullSnapshot = (): AppSnapshot => {
+    if (!fullSnapshot) {
+      fullSnapshot = buildSnapshot(appState, now, 'full', { topicLabels });
+    }
+    return fullSnapshot;
+  };
+
+  const getSlimSnapshot = (): AppSnapshot => {
+    if (!slimSnapshot) {
+      slimSnapshot = slimDownSnapshot(getFullSnapshot());
+    }
+    return slimSnapshot;
+  };
+
   for (const candidate of [dashboardWindow, practiceWindow]) {
     if (candidate && !candidate.isDestroyed() && candidate.webContents.id !== options.skipWebContentsId) {
-      const payload = isPracticeWindowWebContents(candidate.webContents.id) ? fullSnapshot : slimSnapshot;
+      const payload = isPracticeWindowWebContents(candidate.webContents.id) ? getFullSnapshot() : getSlimSnapshot();
       candidate.webContents.send('snapshot:updated', payload);
     }
   }

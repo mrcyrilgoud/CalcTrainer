@@ -63,6 +63,7 @@ type ActiveSessionStatus = {
 
 type ScheduleSlotView = {
   slotId: string;
+  scheduledFor: string;
   label: string;
   status: 'upcoming' | 'queued' | 'active' | 'completed';
 };
@@ -78,6 +79,10 @@ type HistoryPoint = {
   dateKey: string;
   completed: number;
 };
+
+function assertNever(value: never, message = 'Exhaustive switch fell through'): never {
+  throw new Error(message);
+}
 
 type QuestionSourceRef = {
   documentId: string;
@@ -221,24 +226,340 @@ type AppSnapshot = {
   overdueSummary: string | null;
 };
 
-function snapshotContentJson(snapshot: AppSnapshot): string {
-  const { now: _now, ...rest } = snapshot;
-  return JSON.stringify(rest);
+function sameSchedule(left: AppSnapshot['schedule'], right: AppSnapshot['schedule']): boolean {
+  if (left.length !== right.length) {
+    return false;
+  }
+  for (let index = 0; index < left.length; index += 1) {
+    const leftSlot = left[index];
+    const rightSlot = right[index];
+    if (!leftSlot || !rightSlot) {
+      return false;
+    }
+    if (
+      leftSlot.slotId !== rightSlot.slotId
+      || leftSlot.scheduledFor !== rightSlot.scheduledFor
+      || leftSlot.label !== rightSlot.label
+      || leftSlot.status !== rightSlot.status
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function sameHistory(left: AppSnapshot['history'], right: AppSnapshot['history']): boolean {
+  if (left.length !== right.length) {
+    return false;
+  }
+  for (let index = 0; index < left.length; index += 1) {
+    const leftEntry = left[index];
+    const rightEntry = right[index];
+    if (!leftEntry || !rightEntry) {
+      return false;
+    }
+    if (leftEntry.dateKey !== rightEntry.dateKey || leftEntry.completed !== rightEntry.completed) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function sameWeakTopics(left: AppSnapshot['weakTopics'], right: AppSnapshot['weakTopics']): boolean {
+  if (left.length !== right.length) {
+    return false;
+  }
+  for (let index = 0; index < left.length; index += 1) {
+    const leftEntry = left[index];
+    const rightEntry = right[index];
+    if (!leftEntry || !rightEntry) {
+      return false;
+    }
+    if (
+      leftEntry.topicId !== rightEntry.topicId
+      || leftEntry.topicTag !== rightEntry.topicTag
+      || leftEntry.label !== rightEntry.label
+      || leftEntry.score !== rightEntry.score
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function sameActiveSessionStatus(left: ActiveSessionStatus | null, right: ActiveSessionStatus | null): boolean {
+  if (!left || !right) {
+    return left === right;
+  }
+  return left.answeredCount === right.answeredCount
+    && left.totalQuestions === right.totalQuestions
+    && left.minDurationMet === right.minDurationMet
+    && left.remainingMs === right.remainingMs
+    && left.canComplete === right.canComplete;
+}
+
+function sameQuestionProgress(left: QuestionProgress | undefined, right: QuestionProgress | undefined): boolean {
+  if (!left || !right) {
+    return left === right;
+  }
+  const leftEvaluation = left.evaluation;
+  const rightEvaluation = right.evaluation;
+  if (!leftEvaluation || !rightEvaluation) {
+    return leftEvaluation === rightEvaluation
+      && left.answerText === right.answerText
+      && left.revealedSolutionAt === right.revealedSolutionAt
+      && left.selfCheck === right.selfCheck;
+  }
+  return left.answerText === right.answerText
+    && left.revealedSolutionAt === right.revealedSolutionAt
+    && left.selfCheck === right.selfCheck
+    && leftEvaluation.correct === rightEvaluation.correct
+    && leftEvaluation.feedback === rightEvaluation.feedback
+    && leftEvaluation.expected === rightEvaluation.expected;
+}
+
+function sameActiveSession(left: PracticeSession | null, right: PracticeSession | null): boolean {
+  if (!left || !right) {
+    return left === right;
+  }
+  if (
+    left.id !== right.id
+    || left.status !== right.status
+    || left.startedAt !== right.startedAt
+    || left.questions.length !== right.questions.length
+  ) {
+    return false;
+  }
+  for (let index = 0; index < left.questions.length; index += 1) {
+    const leftQuestion = left.questions[index];
+    const rightQuestion = right.questions[index];
+    if (!leftQuestion || !rightQuestion || leftQuestion.id !== rightQuestion.id) {
+      return false;
+    }
+    const leftProgress = left.responses[leftQuestion.id];
+    const rightProgress = right.responses[rightQuestion.id];
+    if (!sameQuestionProgress(leftProgress, rightProgress)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function sameSettings(left: AppSnapshot['settings'], right: AppSnapshot['settings']): boolean {
+  return left.timezone === right.timezone
+    && left.activeHours.startHour === right.activeHours.startHour
+    && left.activeHours.endHour === right.activeHours.endHour
+    && left.reminderIntervalHours === right.reminderIntervalHours
+    && left.minimumSessionMinutes === right.minimumSessionMinutes
+    && left.targetSessionMinutes === right.targetSessionMinutes
+    && left.enforcementMode === right.enforcementMode
+    && left.enforcementStyle === right.enforcementStyle
+    && left.lighterReopenDelayMinutes === right.lighterReopenDelayMinutes
+    && left.questionSourceMode === right.questionSourceMode;
 }
 
 function snapshotsContentEqual(left: AppSnapshot, right: AppSnapshot): boolean {
-  return snapshotContentJson(left) === snapshotContentJson(right);
+  return sameSettings(left.settings, right.settings)
+    && sameActiveSession(left.activeSession, right.activeSession)
+    && sameActiveSessionStatus(left.activeSessionStatus, right.activeSessionStatus)
+    && sameSchedule(left.schedule, right.schedule)
+    && sameWeakTopics(left.weakTopics, right.weakTopics)
+    && sameHistory(left.history, right.history)
+    && left.streakDays === right.streakDays
+    && left.completedToday === right.completedToday
+    && left.pendingCount === right.pendingCount
+    && left.overdueSummary === right.overdueSummary;
 }
 
-function questionBankContentJson(view: QuestionBankView): string {
-  return JSON.stringify(view);
+function sameDocuments(left: QuestionBankDocument[], right: QuestionBankDocument[]): boolean {
+  if (left.length !== right.length) {
+    return false;
+  }
+  for (let index = 0; index < left.length; index += 1) {
+    const leftDocument = left[index];
+    const rightDocument = right[index];
+    if (!leftDocument || !rightDocument) {
+      return false;
+    }
+    if (
+      leftDocument.id !== rightDocument.id
+      || leftDocument.fileName !== rightDocument.fileName
+      || leftDocument.extractionStatus !== rightDocument.extractionStatus
+      || leftDocument.extractionError !== rightDocument.extractionError
+      || leftDocument.chunkCount !== rightDocument.chunkCount
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function sameBatches(left: QuestionGenerationBatch[], right: QuestionGenerationBatch[]): boolean {
+  if (left.length !== right.length) {
+    return false;
+  }
+  for (let index = 0; index < left.length; index += 1) {
+    const leftBatch = left[index];
+    const rightBatch = right[index];
+    if (!leftBatch || !rightBatch) {
+      return false;
+    }
+    if (
+      leftBatch.id !== rightBatch.id
+      || leftBatch.status !== rightBatch.status
+      || leftBatch.updatedAt !== rightBatch.updatedAt
+      || leftBatch.requestedDraftCount !== rightBatch.requestedDraftCount
+      || leftBatch.generationMode !== rightBatch.generationMode
+      || leftBatch.completedRequestCount !== rightBatch.completedRequestCount
+      || leftBatch.totalRequestCount !== rightBatch.totalRequestCount
+      || leftBatch.repairedDraftCount !== rightBatch.repairedDraftCount
+      || leftBatch.errorMessage !== rightBatch.errorMessage
+      || leftBatch.modelName !== rightBatch.modelName
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function sameDraftValidationIssues(left: DraftValidationIssue[], right: DraftValidationIssue[]): boolean {
+  if (left.length !== right.length) {
+    return false;
+  }
+  for (let index = 0; index < left.length; index += 1) {
+    const leftIssue = left[index];
+    const rightIssue = right[index];
+    if (!leftIssue || !rightIssue || leftIssue.field !== rightIssue.field || leftIssue.message !== rightIssue.message) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function sameDrafts(left: GeneratedQuestionDraft[], right: GeneratedQuestionDraft[]): boolean {
+  if (left.length !== right.length) {
+    return false;
+  }
+  for (let index = 0; index < left.length; index += 1) {
+    const leftDraft = left[index];
+    const rightDraft = right[index];
+    if (!leftDraft || !rightDraft) {
+      return false;
+    }
+    if (
+      leftDraft.id !== rightDraft.id
+      || leftDraft.updatedAt !== rightDraft.updatedAt
+      || !sameDraftValidationIssues(leftDraft.validationIssues, rightDraft.validationIssues)
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function samePublishedQuestions(left: PublishedBankQuestion[], right: PublishedBankQuestion[]): boolean {
+  if (left.length !== right.length) {
+    return false;
+  }
+  for (let index = 0; index < left.length; index += 1) {
+    const leftQuestion = left[index];
+    const rightQuestion = right[index];
+    if (!leftQuestion || !rightQuestion) {
+      return false;
+    }
+    if (
+      leftQuestion.bankQuestionId !== rightQuestion.bankQuestionId
+      || leftQuestion.updatedAt !== rightQuestion.updatedAt
+      || leftQuestion.archivedAt !== rightQuestion.archivedAt
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function sameSummaryEntries(
+  left: Array<{ key: string; label: string; count: number }>,
+  right: Array<{ key: string; label: string; count: number }>
+): boolean {
+  if (left.length !== right.length) {
+    return false;
+  }
+  for (let index = 0; index < left.length; index += 1) {
+    const leftEntry = left[index];
+    const rightEntry = right[index];
+    if (!leftEntry || !rightEntry) {
+      return false;
+    }
+    if (
+      leftEntry.key !== rightEntry.key
+      || leftEntry.label !== rightEntry.label
+      || leftEntry.count !== rightEntry.count
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function samePublishedSummary(left: QuestionBankView['publishedSummary'], right: QuestionBankView['publishedSummary']): boolean {
+  return left.activeCount === right.activeCount
+    && left.archivedCount === right.archivedCount
+    && left.coverage.generatedQuestionCount === right.coverage.generatedQuestionCount
+    && left.coverage.requiresSeededFallback === right.coverage.requiresSeededFallback
+    && left.coverage.missingBuckets.length === right.coverage.missingBuckets.length
+    && left.coverage.missingBuckets.every((bucket, index) => bucket === right.coverage.missingBuckets[index])
+    && sameSummaryEntries(left.byBucket, right.byBucket)
+    && sameSummaryEntries(left.byTopic, right.byTopic);
 }
 
 function questionBankContentEqual(left: QuestionBankView | null, right: QuestionBankView | null): boolean {
   if (!left || !right) {
     return left === right;
   }
-  return questionBankContentJson(left) === questionBankContentJson(right);
+  return sameDocuments(left.documents, right.documents)
+    && sameBatches(left.batches, right.batches)
+    && sameDrafts(left.drafts, right.drafts)
+    && samePublishedQuestions(left.publishedQuestions, right.publishedQuestions)
+    && samePublishedSummary(left.publishedSummary, right.publishedSummary)
+    && left.proxyStatus.configured === right.proxyStatus.configured
+    && left.proxyStatus.baseUrl === right.proxyStatus.baseUrl
+    && left.proxyStatus.model === right.proxyStatus.model
+    && left.proxyStatus.parseMode === right.proxyStatus.parseMode
+    && left.proxyStatus.message === right.proxyStatus.message;
+}
+
+function questionSourceDashboardNeedsReplace(
+  previousSnapshot: AppSnapshot,
+  nextSnapshot: AppSnapshot,
+  previousBank: QuestionBankView | null,
+  nextBank: QuestionBankView | null
+): boolean {
+  if (previousSnapshot.settings.questionSourceMode !== nextSnapshot.settings.questionSourceMode) {
+    return true;
+  }
+  if (!previousBank || !nextBank) {
+    return !questionBankContentEqual(previousBank, nextBank);
+  }
+  return !samePublishedSummary(previousBank.publishedSummary, nextBank.publishedSummary)
+    || previousBank.proxyStatus.parseMode !== nextBank.proxyStatus.parseMode
+    || previousBank.proxyStatus.model !== nextBank.proxyStatus.model
+    || previousBank.proxyStatus.baseUrl !== nextBank.proxyStatus.baseUrl;
+}
+
+function maybeRefreshDashboardQuestionSource(
+  previousSnapshot: AppSnapshot,
+  nextSnapshot: AppSnapshot,
+  previousBank: QuestionBankView | null,
+  nextBank: QuestionBankView | null
+): void {
+  if (mode !== 'dashboard' || !appElement?.querySelector('[data-view="dashboard"]')) {
+    return;
+  }
+  if (!questionSourceDashboardNeedsReplace(previousSnapshot, nextSnapshot, previousBank, nextBank)) {
+    return;
+  }
+  replaceSection('dashboard-question-source', renderQuestionSourceCard(nextSnapshot, nextBank));
 }
 
 const appElement = document.getElementById('app');
@@ -251,7 +572,9 @@ let renderedSnapshot: AppSnapshot | null = null;
 let questionBankView: QuestionBankView | null = null;
 let renderedQuestionBankView: QuestionBankView | null = null;
 let bannerMessage = '';
+let initializationError = '';
 const draftAnswers: Record<string, string> = {};
+const draftFieldEdits: Record<string, Record<string, string>> = {};
 let selectedDocumentIds = new Set<string>();
 
 function escapeHtml(input: string): string {
@@ -483,6 +806,13 @@ function formatNow(): string {
   }).format(new Date());
 }
 
+function describeError(error: unknown): string {
+  if (error instanceof Error && error.message.trim().length > 0) {
+    return error.message;
+  }
+  return 'Unexpected error.';
+}
+
 function setBanner(message: string): void {
   bannerMessage = message;
   if (!renderedSnapshot) {
@@ -636,7 +966,7 @@ function documentStatusLabel(document: QuestionBankDocument): string {
 }
 
 function renderBanner(): string {
-  return bannerMessage ? `<div class="status-banner">${escapeHtml(bannerMessage)}</div>` : '';
+  return bannerMessage ? `<div class="status-banner" role="status" aria-live="polite">${escapeHtml(bannerMessage)}</div>` : '';
 }
 
 function createElementFromHtml<T extends Element>(html: string): T {
@@ -651,6 +981,58 @@ function replaceSection(sectionName: string, html: string): void {
     return;
   }
   current.replaceWith(createElementFromHtml<HTMLElement>(html));
+}
+
+type DraftFocusState = {
+  draftId: string;
+  fieldName: string;
+  selectionStart?: number;
+  selectionEnd?: number;
+};
+
+function captureDraftFocusState(): DraftFocusState | null {
+  if (!appElement) {
+    return null;
+  }
+  const activeElement = document.activeElement;
+  if (!(activeElement instanceof HTMLInputElement || activeElement instanceof HTMLTextAreaElement || activeElement instanceof HTMLSelectElement)) {
+    return null;
+  }
+  const fieldName = activeElement.dataset.draftField;
+  if (!fieldName) {
+    return null;
+  }
+  const draftCard = activeElement.closest<HTMLElement>('[data-draft-card]');
+  const draftId = draftCard?.dataset.draftCard;
+  if (!draftId) {
+    return null;
+  }
+  return {
+    draftId,
+    fieldName,
+    selectionStart: 'selectionStart' in activeElement ? activeElement.selectionStart ?? undefined : undefined,
+    selectionEnd: 'selectionEnd' in activeElement ? activeElement.selectionEnd ?? undefined : undefined
+  };
+}
+
+function restoreDraftFocusState(focusState: DraftFocusState | null): void {
+  if (!focusState || !appElement) {
+    return;
+  }
+  const nextField = appElement.querySelector<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>(
+    `[data-draft-card="${focusState.draftId}"] [data-draft-field="${focusState.fieldName}"]`
+  );
+  if (!nextField) {
+    return;
+  }
+  nextField.focus();
+  if (
+    (nextField instanceof HTMLInputElement || nextField instanceof HTMLTextAreaElement)
+    && typeof focusState.selectionStart === 'number'
+    && typeof focusState.selectionEnd === 'number'
+  ) {
+    nextField.setSelectionRange(focusState.selectionStart, focusState.selectionEnd);
+  }
 }
 
 function refreshDocumentLibrarySection(): void {
@@ -668,6 +1050,43 @@ function updateBannerRegions(): void {
   const bannerHtml = renderBanner();
   for (const region of appElement.querySelectorAll<HTMLElement>('[data-live="banner-region"]')) {
     region.innerHTML = bannerHtml;
+  }
+}
+
+function updateQuestionBankSections(previousView: QuestionBankView | null, nextView: QuestionBankView | null, snapshotValue: AppSnapshot): void {
+  if (mode !== 'dashboard' || !appElement) {
+    return;
+  }
+  if (!appElement.querySelector('[data-view="dashboard"]')) {
+    appElement.innerHTML = renderDashboard(snapshotValue, nextView);
+    return;
+  }
+  if (
+    !previousView
+    || !nextView
+    || !sameDocuments(previousView.documents, nextView.documents)
+    || previousView.proxyStatus.message !== nextView.proxyStatus.message
+    || previousView.proxyStatus.configured !== nextView.proxyStatus.configured
+  ) {
+    replaceSection('dashboard-documents', renderDocumentLibrary(nextView));
+  }
+  if (
+    !previousView
+    || !nextView
+    || !sameDrafts(previousView.drafts, nextView.drafts)
+    || !sameBatches(previousView.batches, nextView.batches)
+  ) {
+    const focusState = captureDraftFocusState();
+    replaceSection('dashboard-drafts', renderDraftReviewSection(nextView));
+    restoreDraftFocusState(focusState);
+  }
+  if (
+    !previousView
+    || !nextView
+    || !samePublishedQuestions(previousView.publishedQuestions, nextView.publishedQuestions)
+    || !samePublishedSummary(previousView.publishedSummary, nextView.publishedSummary)
+  ) {
+    replaceSection('dashboard-published', renderPublishedLibrary(nextView));
   }
 }
 
@@ -745,7 +1164,7 @@ function renderDashboardPressure(snapshotValue: AppSnapshot): string {
     <article class="card" data-section="dashboard-pressure">
       <h2 class="card-title">Current pressure</h2>
       ${snapshotValue.overdueSummary
-        ? `<div class="status-banner" data-live="dashboard-overdue-summary">${escapeHtml(snapshotValue.overdueSummary)}</div>`
+        ? `<div class="status-banner" data-live="dashboard-overdue-summary" role="status" aria-live="polite">${escapeHtml(snapshotValue.overdueSummary)}</div>`
         : '<p class="subtle">No session is active right now. The next slot will queue automatically.</p>'}
       <div class="stat-row">
         <div class="stat-box">
@@ -900,6 +1319,9 @@ function renderDocumentLibrary(questionBankValue: QuestionBankView | null): stri
         <button class="secondary" data-action="import-documents">Import PDF or PPTX</button>
         <button class="primary" data-action="generate-drafts" ${generateDisabled ? 'disabled' : ''}>Generate draft questions</button>
       </div>
+      ${generateDisabled
+        ? '<p class="small-copy">Enable generation by selecting at least one ready document and configuring the proxy.</p>'
+        : ''}
       ${documents.length === 0
         ? '<p class="small-copy">No documents imported yet.</p>'
         : `
@@ -942,56 +1364,90 @@ function renderDraftIssues(draft: GeneratedQuestionDraft): string {
   `;
 }
 
+function getDraftEditValue(draftId: string, field: string, fallback: string): string {
+  return draftFieldEdits[draftId]?.[field] ?? fallback;
+}
+
+function setDraftEditValue(draftId: string, field: string, value: string): void {
+  if (!draftFieldEdits[draftId]) {
+    draftFieldEdits[draftId] = {};
+  }
+  draftFieldEdits[draftId]![field] = value;
+}
+
+function clearDraftEditValues(draftId: string): void {
+  delete draftFieldEdits[draftId];
+}
+
+function clearAllDraftEditValues(): void {
+  for (const draftId of Object.keys(draftFieldEdits)) {
+    delete draftFieldEdits[draftId];
+  }
+}
+
+function clearDraftEditValuesForBatch(batchId: string): void {
+  for (const draftId of Object.keys(draftFieldEdits)) {
+    if (questionBankView?.drafts.some((draft) => draft.id === draftId && draft.batchId === batchId)) {
+      delete draftFieldEdits[draftId];
+    }
+  }
+}
+
 function renderDraftSchemaEditor(draft: GeneratedQuestionDraft): string {
-  switch (draft.answerSchema.kind) {
+  const draftId = draft.id;
+  const schema = draft.answerSchema;
+  switch (schema.kind) {
     case 'multiple_choice':
       return `
         <label class="editor-field">
           <span class="stat-label">Options</span>
-          <textarea class="text-area compact-area" data-draft-field="mc-options">${escapeHtml(draft.answerSchema.options.join('\n'))}</textarea>
+          <textarea class="text-area compact-area" data-draft-field="mc-options">${escapeHtml(getDraftEditValue(draftId, 'mc-options', schema.options.join('\n')))}</textarea>
         </label>
         <label class="editor-field">
           <span class="stat-label">Correct index</span>
-          <input class="text-input" type="number" min="0" step="1" value="${draft.answerSchema.correctIndex}" data-draft-field="mc-correct-index" />
+          <input class="text-input" type="number" min="0" step="1" value="${escapeHtml(getDraftEditValue(draftId, 'mc-correct-index', String(schema.correctIndex)))}" data-draft-field="mc-correct-index" />
         </label>
       `;
     case 'numeric':
       return `
         <label class="editor-field">
           <span class="stat-label">Correct value</span>
-          <input class="text-input" type="number" value="${draft.answerSchema.correctValue}" data-draft-field="numeric-correct-value" />
+          <input class="text-input" type="number" value="${escapeHtml(getDraftEditValue(draftId, 'numeric-correct-value', String(schema.correctValue)))}" data-draft-field="numeric-correct-value" />
         </label>
         <label class="editor-field">
           <span class="stat-label">Tolerance</span>
-          <input class="text-input" type="number" min="0" step="0.01" value="${draft.answerSchema.tolerance}" data-draft-field="numeric-tolerance" />
+          <input class="text-input" type="number" min="0" step="0.01" value="${escapeHtml(getDraftEditValue(draftId, 'numeric-tolerance', String(schema.tolerance)))}" data-draft-field="numeric-tolerance" />
         </label>
         <label class="editor-field">
           <span class="stat-label">Unit</span>
-          <input class="text-input" value="${escapeHtml(draft.answerSchema.unitLabel ?? '')}" data-draft-field="numeric-unit-label" />
+          <input class="text-input" value="${escapeHtml(getDraftEditValue(draftId, 'numeric-unit-label', schema.unitLabel ?? ''))}" data-draft-field="numeric-unit-label" />
         </label>
       `;
     case 'structured':
       return `
         <label class="editor-field">
           <span class="stat-label">Accepted answers</span>
-          <textarea class="text-area compact-area" data-draft-field="structured-answers">${escapeHtml(draft.answerSchema.acceptableAnswers.join('\n'))}</textarea>
+          <textarea class="text-area compact-area" data-draft-field="structured-answers">${escapeHtml(getDraftEditValue(draftId, 'structured-answers', schema.acceptableAnswers.join('\n')))}</textarea>
         </label>
         <label class="editor-field">
           <span class="stat-label">Placeholder</span>
-          <input class="text-input" value="${escapeHtml(draft.answerSchema.placeholder ?? '')}" data-draft-field="structured-placeholder" />
+          <input class="text-input" value="${escapeHtml(getDraftEditValue(draftId, 'structured-placeholder', schema.placeholder ?? ''))}" data-draft-field="structured-placeholder" />
         </label>
       `;
     case 'derivation':
       return `
         <label class="editor-field full-span">
           <span class="stat-label">Checklist</span>
-          <textarea class="text-area compact-area" data-draft-field="derivation-checklist">${escapeHtml(draft.answerSchema.checklist.join('\n'))}</textarea>
+          <textarea class="text-area compact-area" data-draft-field="derivation-checklist">${escapeHtml(getDraftEditValue(draftId, 'derivation-checklist', schema.checklist.join('\n')))}</textarea>
         </label>
       `;
+    default:
+      return assertNever(schema);
   }
 }
 
 function renderDraftCard(draft: GeneratedQuestionDraft): string {
+  const draftId = draft.id;
   return `
     <article class="question-card draft-card" data-draft-card="${draft.id}">
       <div class="question-top">
@@ -1011,56 +1467,56 @@ function renderDraftCard(draft: GeneratedQuestionDraft): string {
       <div class="draft-editor-grid">
         <label class="editor-field">
           <span class="stat-label">Title</span>
-          <input class="text-input" value="${escapeHtml(draft.title)}" data-draft-field="title" />
+          <input class="text-input" value="${escapeHtml(getDraftEditValue(draftId, 'title', draft.title))}" data-draft-field="title" />
         </label>
         <label class="editor-field">
           <span class="stat-label">Source</span>
-          <input class="text-input" value="${escapeHtml(draft.source)}" data-draft-field="source" />
+          <input class="text-input" value="${escapeHtml(getDraftEditValue(draftId, 'source', draft.source))}" data-draft-field="source" />
         </label>
         <label class="editor-field">
           <span class="stat-label">Topic label</span>
-          <input class="text-input" value="${escapeHtml(draft.topicLabel)}" data-draft-field="topicLabel" />
+          <input class="text-input" value="${escapeHtml(getDraftEditValue(draftId, 'topicLabel', draft.topicLabel))}" data-draft-field="topicLabel" />
         </label>
         <label class="editor-field">
           <span class="stat-label">Topic ID</span>
-          <input class="text-input" value="${escapeHtml(draft.topicId)}" data-draft-field="topicId" />
+          <input class="text-input" value="${escapeHtml(getDraftEditValue(draftId, 'topicId', draft.topicId))}" data-draft-field="topicId" />
         </label>
         <label class="editor-field">
           <span class="stat-label">Difficulty</span>
           <select class="text-input" data-draft-field="difficulty">
-            <option value="medium" ${draft.difficulty === 'medium' ? 'selected' : ''}>medium</option>
-            <option value="hard" ${draft.difficulty === 'hard' ? 'selected' : ''}>hard</option>
+            <option value="medium" ${getDraftEditValue(draftId, 'difficulty', draft.difficulty) === 'medium' ? 'selected' : ''}>medium</option>
+            <option value="hard" ${getDraftEditValue(draftId, 'difficulty', draft.difficulty) === 'hard' ? 'selected' : ''}>hard</option>
           </select>
         </label>
         <label class="editor-field">
           <span class="stat-label">Prompt type</span>
           <select class="text-input" data-draft-field="promptType">
-            <option value="multiple_choice" ${draft.promptType === 'multiple_choice' ? 'selected' : ''}>multiple_choice</option>
-            <option value="numeric" ${draft.promptType === 'numeric' ? 'selected' : ''}>numeric</option>
-            <option value="structured" ${draft.promptType === 'structured' ? 'selected' : ''}>structured</option>
-            <option value="derivation" ${draft.promptType === 'derivation' ? 'selected' : ''}>derivation</option>
+            <option value="multiple_choice" ${getDraftEditValue(draftId, 'promptType', draft.promptType) === 'multiple_choice' ? 'selected' : ''}>multiple_choice</option>
+            <option value="numeric" ${getDraftEditValue(draftId, 'promptType', draft.promptType) === 'numeric' ? 'selected' : ''}>numeric</option>
+            <option value="structured" ${getDraftEditValue(draftId, 'promptType', draft.promptType) === 'structured' ? 'selected' : ''}>structured</option>
+            <option value="derivation" ${getDraftEditValue(draftId, 'promptType', draft.promptType) === 'derivation' ? 'selected' : ''}>derivation</option>
           </select>
         </label>
         <label class="editor-field">
           <span class="stat-label">Selection bucket</span>
           <select class="text-input" data-draft-field="selectionBucket">
-            <option value="derivation" ${draft.selectionBucket === 'derivation' ? 'selected' : ''}>derivation</option>
-            <option value="backprop_auto" ${draft.selectionBucket === 'backprop_auto' ? 'selected' : ''}>backprop_auto</option>
-            <option value="cnn_auto" ${draft.selectionBucket === 'cnn_auto' ? 'selected' : ''}>cnn_auto</option>
-            <option value="concept" ${draft.selectionBucket === 'concept' ? 'selected' : ''}>concept</option>
+            <option value="derivation" ${getDraftEditValue(draftId, 'selectionBucket', draft.selectionBucket) === 'derivation' ? 'selected' : ''}>derivation</option>
+            <option value="backprop_auto" ${getDraftEditValue(draftId, 'selectionBucket', draft.selectionBucket) === 'backprop_auto' ? 'selected' : ''}>backprop_auto</option>
+            <option value="cnn_auto" ${getDraftEditValue(draftId, 'selectionBucket', draft.selectionBucket) === 'cnn_auto' ? 'selected' : ''}>cnn_auto</option>
+            <option value="concept" ${getDraftEditValue(draftId, 'selectionBucket', draft.selectionBucket) === 'concept' ? 'selected' : ''}>concept</option>
           </select>
         </label>
         <label class="editor-field full-span">
           <span class="stat-label">Stem</span>
-          <textarea class="text-area compact-area" data-draft-field="stem">${escapeHtml(draft.stem)}</textarea>
+          <textarea class="text-area compact-area" data-draft-field="stem">${escapeHtml(getDraftEditValue(draftId, 'stem', draft.stem))}</textarea>
         </label>
         <label class="editor-field full-span">
           <span class="stat-label">Hint</span>
-          <textarea class="text-area compact-area" data-draft-field="hint">${escapeHtml(draft.hint ?? '')}</textarea>
+          <textarea class="text-area compact-area" data-draft-field="hint">${escapeHtml(getDraftEditValue(draftId, 'hint', draft.hint ?? ''))}</textarea>
         </label>
         <label class="editor-field full-span">
           <span class="stat-label">Worked solution</span>
-          <textarea class="text-area compact-area" data-draft-field="workedSolution">${escapeHtml(draft.workedSolution)}</textarea>
+          <textarea class="text-area compact-area" data-draft-field="workedSolution">${escapeHtml(getDraftEditValue(draftId, 'workedSolution', draft.workedSolution))}</textarea>
         </label>
         ${renderDraftSchemaEditor(draft)}
       </div>
@@ -1389,15 +1845,15 @@ function renderPracticeHero(snapshotValue: AppSnapshot): string {
       <div class="practice-meta">
         <div class="meta-box">
           <span class="stat-label">Answered</span>
-          <span class="stat-value" data-live="answered-count">${status.answeredCount}/${status.totalQuestions}</span>
+          <span class="stat-value" data-live="answered-count" aria-live="polite">${status.answeredCount}/${status.totalQuestions}</span>
         </div>
         <div class="meta-box">
           <span class="stat-label">Minimum Timer</span>
-          <span class="stat-value" data-live="minimum-timer">${status.minDurationMet ? 'Done' : formatDuration(status.remainingMs)}</span>
+          <span class="stat-value" data-live="minimum-timer" aria-live="polite">${status.minDurationMet ? 'Done' : formatDuration(status.remainingMs)}</span>
         </div>
         <div class="meta-box">
           <span class="stat-label">Completion Gate</span>
-          <span class="stat-value" data-live="completion-gate">${status.canComplete ? 'Unlocked' : 'Locked'}</span>
+          <span class="stat-value" data-live="completion-gate" aria-live="assertive">${status.canComplete ? 'Unlocked' : 'Locked'}</span>
         </div>
       </div>
       <div class="actions">
@@ -1447,10 +1903,10 @@ function updateDashboardView(previousSnapshot: AppSnapshot, nextSnapshot: AppSna
   if (previousSnapshot.activeSession?.id !== nextSnapshot.activeSession?.id) {
     replaceSection('dashboard-hero', renderDashboardHero(nextSnapshot));
   }
-  if (JSON.stringify(previousSnapshot.schedule) !== JSON.stringify(nextSnapshot.schedule)) {
+  if (!sameSchedule(previousSnapshot.schedule, nextSnapshot.schedule)) {
     replaceSection('dashboard-schedule', renderDashboardSchedule(nextSnapshot));
   }
-  if (JSON.stringify(previousSnapshot.history) !== JSON.stringify(nextSnapshot.history)) {
+  if (!sameHistory(previousSnapshot.history, nextSnapshot.history)) {
     replaceSection('dashboard-history', renderDashboardHistory(nextSnapshot));
   }
   if (
@@ -1467,10 +1923,7 @@ function updateDashboardView(previousSnapshot: AppSnapshot, nextSnapshot: AppSna
   ) {
     replaceSection('dashboard-enforcement', renderDashboardEnforcement(nextSnapshot));
   }
-  if (previousSnapshot.settings.questionSourceMode !== nextSnapshot.settings.questionSourceMode) {
-    replaceSection('dashboard-question-source', renderQuestionSourceCard(nextSnapshot, questionBankView));
-  }
-  if (JSON.stringify(previousSnapshot.weakTopics) !== JSON.stringify(nextSnapshot.weakTopics)) {
+  if (!sameWeakTopics(previousSnapshot.weakTopics, nextSnapshot.weakTopics)) {
     replaceSection('dashboard-weak-topics', renderDashboardWeakTopics(nextSnapshot));
   }
 }
@@ -1485,7 +1938,7 @@ function updatePracticeQuestionCards(previousSnapshot: AppSnapshot, nextSnapshot
   for (const question of nextSession.questions) {
     const previousProgress = previousSession.responses[question.id] ?? {};
     const nextProgress = nextSession.responses[question.id] ?? {};
-    const shouldReplace = JSON.stringify(previousProgress) !== JSON.stringify(nextProgress);
+    const shouldReplace = !sameQuestionProgress(previousProgress, nextProgress);
 
     if (!shouldReplace) {
       continue;
@@ -1511,6 +1964,9 @@ function updatePracticeView(previousSnapshot: AppSnapshot, nextSnapshot: AppSnap
   }
 
   updateBannerRegions();
+  if (!sameSettings(previousSnapshot.settings, nextSnapshot.settings)) {
+    replaceSection('practice-hero', renderPracticeHero(nextSnapshot));
+  }
   updatePracticeQuestionCards(previousSnapshot, nextSnapshot);
   updatePracticeLiveState();
 }
@@ -1568,7 +2024,9 @@ function render(): void {
   }
   clockElement.textContent = formatNow();
   if (!snapshot) {
-    appElement.innerHTML = '<section class="empty-state"><p class="subtle">Loading application state...</p></section>';
+    appElement.innerHTML = initializationError
+      ? `<section class="empty-state"><p class="subtle">${escapeHtml(initializationError)}</p><div class="actions" style="justify-content: center;"><button class="primary" data-action="retry-load">Retry loading state</button></div></section>`
+      : '<section class="empty-state"><p class="subtle">Loading application state...</p></section>';
     renderedSnapshot = null;
     return;
   }
@@ -1581,11 +2039,9 @@ function render(): void {
     return;
   }
 
-  if (mode === 'dashboard' && !questionBankContentEqual(renderedQuestionBankView, questionBankView)) {
-    appElement.innerHTML = renderDashboard(snapshot, questionBankView);
-    renderedSnapshot = snapshot;
-    renderedQuestionBankView = questionBankView;
-    return;
+  const questionBankChanged = mode === 'dashboard' && !questionBankContentEqual(renderedQuestionBankView, questionBankView);
+  if (questionBankChanged) {
+    updateQuestionBankSections(renderedQuestionBankView, questionBankView, snapshot);
   }
 
   if (snapshotsContentEqual(previousSnapshot, snapshot)) {
@@ -1593,6 +2049,7 @@ function render(): void {
       updatePracticeLiveState();
     } else {
       updateDashboardLiveState();
+      maybeRefreshDashboardQuestionSource(previousSnapshot, snapshot, renderedQuestionBankView, questionBankView);
     }
     renderedSnapshot = snapshot;
     renderedQuestionBankView = questionBankView;
@@ -1603,6 +2060,7 @@ function render(): void {
     updatePracticeView(previousSnapshot, snapshot);
   } else {
     updateDashboardView(previousSnapshot, snapshot);
+    maybeRefreshDashboardQuestionSource(previousSnapshot, snapshot, renderedQuestionBankView, questionBankView);
   }
   renderedSnapshot = snapshot;
   renderedQuestionBankView = questionBankView;
@@ -1621,9 +2079,54 @@ function tickView(): void {
   updateDashboardLiveState();
 }
 
+type InitializeViewOutcome = 'failed' | 'partial' | 'ok';
+
+async function initializeView(): Promise<InitializeViewOutcome> {
+  initializationError = '';
+  try {
+    await refreshSnapshot();
+  } catch (error) {
+    snapshot = null;
+    renderedSnapshot = null;
+    renderedQuestionBankView = null;
+    initializationError = `Could not load application state. ${describeError(error)}`;
+    render();
+    return 'failed';
+  }
+  if (mode === 'dashboard') {
+    try {
+      await refreshQuestionBank();
+    } catch (error) {
+      setBanner(`Question bank is unavailable right now. ${describeError(error)}`);
+      return 'partial';
+    }
+  }
+  return 'ok';
+}
+
+function syncDraftEditFromTarget(target: HTMLElement): boolean {
+  const fieldName = target.dataset.draftField;
+  if (!fieldName) {
+    return false;
+  }
+  const draftCard = target.closest<HTMLElement>('[data-draft-card]');
+  const draftId = draftCard?.dataset.draftCard;
+  if (!draftId) {
+    return false;
+  }
+  if (!(target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement)) {
+    return false;
+  }
+  setDraftEditValue(draftId, fieldName, target.value);
+  return true;
+}
+
 appElement?.addEventListener('input', (event) => {
   const target = event.target;
-  if (!(target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement)) {
+  if (!(target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement)) {
+    return;
+  }
+  if (syncDraftEditFromTarget(target)) {
     return;
   }
   const questionId = target.dataset.questionId;
@@ -1635,11 +2138,17 @@ appElement?.addEventListener('input', (event) => {
 
 appElement?.addEventListener('change', (event) => {
   const target = event.target;
-  if (!(target instanceof HTMLInputElement)) {
+  if (!(target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement)) {
+    return;
+  }
+  if (syncDraftEditFromTarget(target)) {
     return;
   }
   const documentId = target.dataset.documentId;
   if (documentId) {
+    if (!(target instanceof HTMLInputElement)) {
+      return;
+    }
     if (target.checked) {
       selectedDocumentIds.add(documentId);
     } else {
@@ -1667,212 +2176,254 @@ appElement?.addEventListener('click', async (event) => {
 
   const action = button.dataset.action;
   const questionId = button.dataset.questionId;
+
+  if (action === 'retry-load') {
+    try {
+      const outcome = await initializeView();
+      if (outcome === 'ok') {
+        setBanner('State reloaded.');
+      }
+    } catch (error) {
+      setBanner(`Action failed. ${describeError(error)}`);
+    }
+    return;
+  }
+
   if (!snapshot) {
     return;
   }
 
-  if (action === 'open-practice') {
-    await window.calcTrainer.openPractice();
-    setBanner('Practice window brought to the front.');
-    return;
-  }
-
-  if (action === 'open-dashboard') {
-    await window.calcTrainer.openDashboard();
-    setBanner('Dashboard refreshed.');
-    return;
-  }
-
-  if (action === 'refresh-dashboard') {
-    await refreshSnapshot();
-    await refreshQuestionBank();
-    setBanner('State refreshed from the main process.');
-    return;
-  }
-
-  if (action === 'set-enforcement-style') {
-    const enforcementStyle = button.dataset.style as EnforcementStyle | undefined;
-    if (!enforcementStyle || snapshot.settings.enforcementStyle === enforcementStyle) {
+  try {
+    if (action === 'open-practice') {
+      await window.calcTrainer.openPractice();
+      setBanner('Practice window brought to the front.');
       return;
     }
-    applySnapshot(await window.calcTrainer.updateSettings({ enforcementStyle }) as AppSnapshot);
-    setBanner(`Enforcement style set to ${enforcementStyle}.`);
-    return;
-  }
 
-  if (action === 'set-question-source') {
-    const questionSourceMode = button.dataset.sourceMode as QuestionSourceMode | undefined;
-    if (!questionSourceMode || snapshot.settings.questionSourceMode === questionSourceMode) {
+    if (action === 'open-dashboard') {
+      await window.calcTrainer.openDashboard();
+      setBanner('Dashboard refreshed.');
       return;
     }
-    applySnapshot(await window.calcTrainer.updateSettings({ questionSourceMode }) as AppSnapshot);
-    setBanner(`Question source set to ${questionSourceMode}.`);
-    return;
-  }
 
-  if (action === 'save-lighter-delay') {
-    const delayInput = appElement?.querySelector<HTMLInputElement>('[data-setting-field="lighter-reopen-delay"]');
-    const lighterReopenDelayMinutes = Number(delayInput?.value ?? '');
-    if (!Number.isFinite(lighterReopenDelayMinutes)) {
-      setBanner('Enter a numeric lighter reopen delay between 1 and 30 minutes.');
+    if (action === 'refresh-dashboard') {
+      const outcome = await initializeView();
+      if (outcome === 'ok') {
+        setBanner('State refreshed from the main process.');
+      }
       return;
     }
-    applySnapshot(await window.calcTrainer.updateSettings({ lighterReopenDelayMinutes }) as AppSnapshot);
-    setBanner(`Lighter reopen delay set to ${snapshot.settings.lighterReopenDelayMinutes} minute${snapshot.settings.lighterReopenDelayMinutes === 1 ? '' : 's'}.`);
-    return;
-  }
 
-  if (action === 'import-documents') {
-    applyQuestionBankResult(await window.calcTrainer.importDocuments() as QuestionBankMutationResult);
-    return;
-  }
+    if (action === 'set-enforcement-style') {
+      const enforcementStyle = button.dataset.style as EnforcementStyle | undefined;
+      if (!enforcementStyle || snapshot.settings.enforcementStyle === enforcementStyle) {
+        return;
+      }
+      applySnapshot(await window.calcTrainer.updateSettings({ enforcementStyle }) as AppSnapshot);
+      setBanner(`Enforcement style set to ${enforcementStyle}.`);
+      return;
+    }
 
-  if (action === 'generate-drafts') {
-    applyQuestionBankResult(
-      await window.calcTrainer.generateDraftBatch({
+    if (action === 'set-question-source') {
+      const questionSourceMode = button.dataset.sourceMode as QuestionSourceMode | undefined;
+      if (!questionSourceMode || snapshot.settings.questionSourceMode === questionSourceMode) {
+        return;
+      }
+      applySnapshot(await window.calcTrainer.updateSettings({ questionSourceMode }) as AppSnapshot);
+      setBanner(`Question source set to ${questionSourceMode}.`);
+      return;
+    }
+
+    if (action === 'save-lighter-delay') {
+      const delayInput = appElement?.querySelector<HTMLInputElement>('[data-setting-field="lighter-reopen-delay"]');
+      const lighterReopenDelayMinutes = Number(delayInput?.value ?? '');
+      if (!Number.isFinite(lighterReopenDelayMinutes)) {
+        setBanner('Enter a numeric lighter reopen delay between 1 and 30 minutes.');
+        return;
+      }
+      applySnapshot(await window.calcTrainer.updateSettings({ lighterReopenDelayMinutes }) as AppSnapshot);
+      setBanner(`Lighter reopen delay set to ${snapshot.settings.lighterReopenDelayMinutes} minute${snapshot.settings.lighterReopenDelayMinutes === 1 ? '' : 's'}.`);
+      return;
+    }
+
+    if (action === 'import-documents') {
+      const result = await window.calcTrainer.importDocuments() as QuestionBankMutationResult;
+      if (result.ok) {
+        clearAllDraftEditValues();
+      }
+      applyQuestionBankResult(result);
+      return;
+    }
+
+    if (action === 'generate-drafts') {
+      const result = await window.calcTrainer.generateDraftBatch({
         documentIds: [...selectedDocumentIds]
-      }) as QuestionBankMutationResult
-    );
-    return;
-  }
+      }) as QuestionBankMutationResult;
+      if (result.ok) {
+        clearAllDraftEditValues();
+      }
+      applyQuestionBankResult(result);
+      return;
+    }
 
-  if (action === 'save-draft') {
-    const draftId = button.dataset.draftId;
-    if (!draftId) {
-      return;
-    }
-    const fields = collectDraftFields(draftId);
-    if (!fields) {
-      setBanner('Draft form is unavailable.');
-      return;
-    }
-    applyQuestionBankResult(
-      await window.calcTrainer.updateDraft({
+    if (action === 'save-draft') {
+      const draftId = button.dataset.draftId;
+      if (!draftId) {
+        return;
+      }
+      const fields = collectDraftFields(draftId);
+      if (!fields) {
+        setBanner('Draft form is unavailable.');
+        return;
+      }
+      const result = await window.calcTrainer.updateDraft({
         draftId,
         fields
-      }) as QuestionBankMutationResult
-    );
-    return;
-  }
-
-  if (action === 'delete-draft') {
-    const draftId = button.dataset.draftId;
-    if (!draftId) {
+      }) as QuestionBankMutationResult;
+      if (result.ok) {
+        clearDraftEditValues(draftId);
+      }
+      applyQuestionBankResult(result);
       return;
     }
-    applyQuestionBankResult(await window.calcTrainer.deleteDraft({ draftId }) as QuestionBankMutationResult);
-    return;
-  }
 
-  if (action === 'publish-draft') {
-    const draftId = button.dataset.draftId;
-    if (!draftId) {
+    if (action === 'delete-draft') {
+      const draftId = button.dataset.draftId;
+      if (!draftId) {
+        return;
+      }
+      const result = await window.calcTrainer.deleteDraft({ draftId }) as QuestionBankMutationResult;
+      if (result.ok) {
+        clearDraftEditValues(draftId);
+      }
+      applyQuestionBankResult(result);
       return;
     }
-    applyQuestionBankResult(await window.calcTrainer.publishDrafts({ draftIds: [draftId] }) as QuestionBankMutationResult);
-    return;
-  }
 
-  if (action === 'publish-batch') {
-    const batchId = button.dataset.batchId;
-    if (!batchId || !questionBankView) {
+    if (action === 'publish-draft') {
+      const draftId = button.dataset.draftId;
+      if (!draftId) {
+        return;
+      }
+      const result = await window.calcTrainer.publishDrafts({ draftIds: [draftId] }) as QuestionBankMutationResult;
+      if (result.ok) {
+        clearDraftEditValues(draftId);
+      }
+      applyQuestionBankResult(result);
       return;
     }
-    const validDraftIds = questionBankView.drafts
-      .filter((draft) => draft.batchId === batchId && draft.validationIssues.length === 0)
-      .map((draft) => draft.id);
-    if (validDraftIds.length === 0) {
-      setBanner('No valid drafts remain in this batch.');
+
+    if (action === 'publish-batch') {
+      const batchId = button.dataset.batchId;
+      if (!batchId || !questionBankView) {
+        return;
+      }
+      const validDraftIds = questionBankView.drafts
+        .filter((draft) => draft.batchId === batchId && draft.validationIssues.length === 0)
+        .map((draft) => draft.id);
+      if (validDraftIds.length === 0) {
+        setBanner('No valid drafts remain in this batch.');
+        return;
+      }
+      const result = await window.calcTrainer.publishDrafts({ draftIds: validDraftIds }) as QuestionBankMutationResult;
+      if (result.ok) {
+        for (const validDraftId of validDraftIds) {
+          clearDraftEditValues(validDraftId);
+        }
+      }
+      applyQuestionBankResult(result);
       return;
     }
-    applyQuestionBankResult(await window.calcTrainer.publishDrafts({ draftIds: validDraftIds }) as QuestionBankMutationResult);
-    return;
-  }
 
-  if (action === 'discard-batch') {
-    const batchId = button.dataset.batchId;
-    if (!batchId) {
+    if (action === 'discard-batch') {
+      const batchId = button.dataset.batchId;
+      if (!batchId) {
+        return;
+      }
+      const result = await window.calcTrainer.deleteDraft({ batchId }) as QuestionBankMutationResult;
+      if (result.ok) {
+        clearDraftEditValuesForBatch(batchId);
+      }
+      applyQuestionBankResult(result);
       return;
     }
-    applyQuestionBankResult(await window.calcTrainer.deleteDraft({ batchId }) as QuestionBankMutationResult);
-    return;
-  }
 
-  if (action === 'archive-published') {
-    const questionId = button.dataset.publishedId;
+    if (action === 'archive-published') {
+      const publishedQuestionId = button.dataset.publishedId;
+      if (!publishedQuestionId) {
+        return;
+      }
+      applyQuestionBankResult(await window.calcTrainer.archivePublished({ questionIds: [publishedQuestionId] }) as QuestionBankMutationResult);
+      return;
+    }
+
+    if (!snapshot.activeSession) {
+      return;
+    }
+
+    if (action === 'complete-session') {
+      const result = await window.calcTrainer.completeSession({
+        sessionId: snapshot.activeSession.id
+      }) as { ok: boolean; reason?: string; snapshot: AppSnapshot };
+      applySnapshot(result.snapshot);
+      setBanner(result.ok ? 'Session completed.' : (result.reason ?? 'Session cannot be completed yet.'));
+      return;
+    }
+
     if (!questionId) {
       return;
     }
-    applyQuestionBankResult(await window.calcTrainer.archivePublished({ questionIds: [questionId] }) as QuestionBankMutationResult);
-    return;
-  }
 
-  if (!snapshot.activeSession) {
-    return;
-  }
-
-  if (action === 'complete-session') {
-    const result = await window.calcTrainer.completeSession({
-      sessionId: snapshot.activeSession.id
-    }) as { ok: boolean; reason?: string; snapshot: AppSnapshot };
-    applySnapshot(result.snapshot);
-    setBanner(result.ok ? 'Session completed.' : (result.reason ?? 'Session cannot be completed yet.'));
-    return;
-  }
-
-  if (!questionId) {
-    return;
-  }
-
-  if (action === 'submit-answer') {
-    const answerText = getDraftAnswer(questionId).trim();
-    if (!answerText) {
-      setBanner('Enter an answer before submitting.');
+    if (action === 'submit-answer') {
+      const answerText = getDraftAnswer(questionId).trim();
+      if (!answerText) {
+        setBanner('Enter an answer before submitting.');
+        return;
+      }
+      const result = await window.calcTrainer.submitAnswer({
+        sessionId: snapshot.activeSession.id,
+        questionId,
+        answerText
+      }) as { snapshot: AppSnapshot };
+      snapshot = result.snapshot;
+      render();
       return;
     }
-    const result = await window.calcTrainer.submitAnswer({
-      sessionId: snapshot.activeSession.id,
-      questionId,
-      answerText
-    }) as { snapshot: AppSnapshot };
-    snapshot = result.snapshot;
-    render();
-    return;
-  }
 
-  if (action === 'reveal-solution') {
-    snapshot = await window.calcTrainer.revealSolution({
-      sessionId: snapshot.activeSession.id,
-      questionId
-    }) as AppSnapshot;
-    render();
-    return;
-  }
-
-  if (action === 'self-check') {
-    const rating = button.dataset.rating as SelfCheckRating | undefined;
-    if (!rating) {
+    if (action === 'reveal-solution') {
+      snapshot = await window.calcTrainer.revealSolution({
+        sessionId: snapshot.activeSession.id,
+        questionId
+      }) as AppSnapshot;
+      render();
       return;
     }
-    snapshot = await window.calcTrainer.selfCheck({
-      sessionId: snapshot.activeSession.id,
-      questionId,
-      rating
-    }) as AppSnapshot;
-    render();
-    return;
-  }
 
+    if (action === 'self-check') {
+      const rating = button.dataset.rating as SelfCheckRating | undefined;
+      if (!rating) {
+        return;
+      }
+      snapshot = await window.calcTrainer.selfCheck({
+        sessionId: snapshot.activeSession.id,
+        questionId,
+        rating
+      }) as AppSnapshot;
+      render();
+      return;
+    }
+  } catch (error) {
+    setBanner(`Action failed. ${describeError(error)}`);
+  }
 });
 
 window.calcTrainer.onSnapshot((nextSnapshot) => {
+  initializationError = '';
   snapshot = nextSnapshot as AppSnapshot;
   render();
 });
 
 setupPracticeWindowCloseInterceptor();
-void refreshSnapshot();
-if (mode === 'dashboard') {
-  void refreshQuestionBank();
-}
-window.setInterval(() => tickView(), 1000);
+void initializeView();
+const tickIntervalMs = mode === 'practice' ? 1000 : 5000;
+window.setInterval(() => tickView(), tickIntervalMs);

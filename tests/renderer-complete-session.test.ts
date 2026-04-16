@@ -30,6 +30,89 @@ const baseSettings = {
   lighterReopenDelayMinutes: 1
 };
 
+function makeQuestionBankView(draftUpdatedAt = '2026-03-24T10:00:00.000Z') {
+  return {
+    documents: [
+      {
+        id: 'doc-1',
+        fileName: 'Lecture 4.pdf',
+        kind: 'pdf',
+        checksumSha256: 'hash',
+        importedAt: '2026-03-24T09:00:00.000Z',
+        extractionStatus: 'ready',
+        chunkCount: 12
+      }
+    ],
+    batches: [
+      {
+        id: 'batch-1',
+        createdAt: '2026-03-24T09:10:00.000Z',
+        updatedAt: draftUpdatedAt,
+        documentIds: ['doc-1'],
+        requestedDraftCount: 1,
+        draftIds: ['draft-1'],
+        status: 'drafts_ready',
+        generationMode: 'chunked_responses',
+        completedRequestCount: 1,
+        totalRequestCount: 1,
+        repairedDraftCount: 0
+      }
+    ],
+    drafts: [
+      {
+        id: 'draft-1',
+        batchId: 'batch-1',
+        createdAt: '2026-03-24T09:10:00.000Z',
+        updatedAt: draftUpdatedAt,
+        rawIndex: 0,
+        title: 'Draft title',
+        source: 'Lecture 4.pdf',
+        topicId: 'binary_bce_backprop',
+        topicLabel: 'Binary BCE backprop',
+        difficulty: 'medium',
+        promptType: 'structured',
+        selectionBucket: 'backprop_auto',
+        stem: 'State the compact derivative.',
+        workedSolution: 'a - y',
+        answerSchema: {
+          kind: 'structured',
+          acceptableAnswers: ['a-y'],
+          placeholder: 'a - y'
+        },
+        citations: [
+          {
+            documentId: 'doc-1',
+            documentName: 'Lecture 4.pdf',
+            chunkId: 'page-1',
+            locatorLabel: 'Page 1',
+            excerpt: 'Derivative expression excerpt.'
+          }
+        ],
+        validationIssues: []
+      }
+    ],
+    publishedQuestions: [],
+    publishedSummary: {
+      activeCount: 0,
+      archivedCount: 0,
+      byBucket: [],
+      byTopic: [],
+      coverage: {
+        generatedQuestionCount: 0,
+        missingBuckets: ['derivation', 'backprop_auto', 'cnn_auto', 'concept'],
+        requiresSeededFallback: true
+      }
+    },
+    proxyStatus: {
+      configured: true,
+      baseUrl: 'http://proxy.test',
+      model: 'gpt-test',
+      parseMode: 'auto',
+      message: 'Proxy configured.'
+    }
+  };
+}
+
 describe('renderer practice flow', () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -599,6 +682,127 @@ describe('renderer practice flow', () => {
 
     expect(document.querySelector('[data-section="dashboard-hero"]')).toBe(hero);
     expect(document.querySelector('[data-section="dashboard-schedule"]')).toBe(scheduleSection);
+  });
+
+  it('preserves unsaved draft edits across question-bank refresh updates', async () => {
+    window.history.replaceState({}, '', '?mode=dashboard');
+
+    const baseSnapshot: StubSnapshot = {
+      now: '2026-03-24T10:00:00.000Z',
+      settings: baseSettings,
+      streakDays: 2,
+      completedToday: 1,
+      pendingCount: 1,
+      overdueSummary: null,
+      weakTopics: [],
+      history: [],
+      schedule: [],
+      activeSession: null,
+      activeSessionStatus: null
+    };
+
+    const getQuestionBank = vi.fn()
+      .mockResolvedValueOnce(makeQuestionBankView('2026-03-24T10:00:00.000Z'))
+      .mockResolvedValueOnce(makeQuestionBankView('2026-03-24T10:05:00.000Z'));
+
+    Object.assign(window, {
+      calcTrainer: {
+        getSnapshot: vi.fn().mockResolvedValue(baseSnapshot),
+        getQuestionBank,
+        openDashboard: vi.fn().mockResolvedValue(baseSnapshot),
+        openPractice: vi.fn().mockResolvedValue(baseSnapshot),
+        hidePracticeWindow: vi.fn().mockResolvedValue(baseSnapshot),
+        updateSettings: vi.fn().mockResolvedValue(baseSnapshot),
+        submitAnswer: vi.fn(),
+        revealSolution: vi.fn(),
+        selfCheck: vi.fn(),
+        completeSession: vi.fn(),
+        onSnapshot: vi.fn(() => () => undefined)
+      }
+    });
+
+    await import('../src/renderer/renderer');
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const input = document.querySelector('[data-draft-card="draft-1"] [data-draft-field="title"]') as HTMLInputElement | null;
+    expect(input).not.toBeNull();
+    input?.focus();
+    input!.value = 'Unsaved title draft';
+    input!.dispatchEvent(new Event('input', { bubbles: true }));
+
+    const refreshButton = document.querySelector('button[data-action="refresh-dashboard"]') as HTMLButtonElement | null;
+    expect(refreshButton).not.toBeNull();
+    refreshButton?.click();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const nextInput = document.querySelector('[data-draft-card="draft-1"] [data-draft-field="title"]') as HTMLInputElement | null;
+    expect(nextInput).not.toBeNull();
+    expect(nextInput?.value).toBe('Unsaved title draft');
+    expect(document.activeElement).toBe(nextInput);
+  });
+
+  it('keeps non-bank sections stable when only question-bank content changes', async () => {
+    window.history.replaceState({}, '', '?mode=dashboard');
+
+    const baseSnapshot: StubSnapshot = {
+      now: '2026-03-24T10:00:00.000Z',
+      settings: baseSettings,
+      streakDays: 1,
+      completedToday: 1,
+      pendingCount: 0,
+      overdueSummary: null,
+      weakTopics: [],
+      history: [{ dateKey: '2026-03-24', completed: 1 }],
+      schedule: [
+        {
+          slotId: '2026-03-24T09:00',
+          scheduledFor: '2026-03-24T16:00:00.000Z',
+          label: '9:00 AM',
+          status: 'completed'
+        }
+      ],
+      activeSession: null,
+      activeSessionStatus: null
+    };
+
+    const getQuestionBank = vi.fn()
+      .mockResolvedValueOnce(makeQuestionBankView('2026-03-24T10:00:00.000Z'))
+      .mockResolvedValueOnce(makeQuestionBankView('2026-03-24T10:05:00.000Z'));
+
+    Object.assign(window, {
+      calcTrainer: {
+        getSnapshot: vi.fn().mockResolvedValue(baseSnapshot),
+        getQuestionBank,
+        openDashboard: vi.fn().mockResolvedValue(baseSnapshot),
+        openPractice: vi.fn().mockResolvedValue(baseSnapshot),
+        hidePracticeWindow: vi.fn().mockResolvedValue(baseSnapshot),
+        updateSettings: vi.fn().mockResolvedValue(baseSnapshot),
+        submitAnswer: vi.fn(),
+        revealSolution: vi.fn(),
+        selfCheck: vi.fn(),
+        completeSession: vi.fn(),
+        onSnapshot: vi.fn(() => () => undefined)
+      }
+    });
+
+    await import('../src/renderer/renderer');
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const scheduleSection = document.querySelector('[data-section="dashboard-schedule"]');
+    const pressureSection = document.querySelector('[data-section="dashboard-pressure"]');
+    expect(scheduleSection).not.toBeNull();
+    expect(pressureSection).not.toBeNull();
+
+    const refreshButton = document.querySelector('button[data-action="refresh-dashboard"]') as HTMLButtonElement | null;
+    refreshButton?.click();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(document.querySelector('[data-section="dashboard-schedule"]')).toBe(scheduleSection);
+    expect(document.querySelector('[data-section="dashboard-pressure"]')).toBe(pressureSection);
   });
 
   it('does not rebuild practice question cards when snapshot:updated only changes now', async () => {
