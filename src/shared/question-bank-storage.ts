@@ -1897,15 +1897,15 @@ async function getLowLevelMetadata(proxyConfig: ProxyConfig, signal: AbortSignal
   }
 
   const request = probeLowLevelMetadata(proxyConfig, signal)
+    .then((metadata) => {
+      LOW_LEVEL_METADATA_CACHE.set(proxyConfig.baseUrl, metadata);
+      return metadata;
+    })
     .catch(() => ({
       supported: false,
       resolvedTool: proxyConfig.tool,
       checkedAtMs: Date.now()
     }))
-    .then((metadata) => {
-      LOW_LEVEL_METADATA_CACHE.set(proxyConfig.baseUrl, metadata);
-      return metadata;
-    })
     .finally(() => {
       LOW_LEVEL_METADATA_IN_FLIGHT.delete(proxyConfig.baseUrl);
     });
