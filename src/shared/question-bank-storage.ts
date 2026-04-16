@@ -1854,7 +1854,9 @@ function parseToolMetadataResponse(body: { defaultTool?: unknown; tools?: unknow
 
 async function probeLowLevelMetadata(proxyConfig: ProxyConfig, signal: AbortSignal): Promise<{ supported: boolean; resolvedTool: string; checkedAtMs: number }> {
   const checkedAtMs = Date.now();
-  if (proxyConfig.parseMode === 'raw_files' || Boolean(process.env.CALCTRAINER_AI_PROXY_TOOL?.trim())) {
+  // When the tool is pinned via env, skip discovery so proxies without /api/tools still work.
+  // raw_files mode still probes /api/tools so the proxy-advertised default can differ from `codex`.
+  if (Boolean(process.env.CALCTRAINER_AI_PROXY_TOOL?.trim())) {
     return {
       supported: true,
       resolvedTool: proxyConfig.tool,
