@@ -576,6 +576,8 @@ let initializationError = '';
 const draftAnswers: Record<string, string> = {};
 const draftFieldEdits: Record<string, Record<string, string>> = {};
 let selectedDocumentIds = new Set<string>();
+const expandedDraftBatches = new Set<string>();
+const DRAFT_BATCH_PREVIEW_LIMIT = 8;
 
 function escapeHtml(input: string): string {
   return input
@@ -779,7 +781,10 @@ function formatPiecewiseExpression(input: string): string | null {
     .trim();
 }
 
-function formatMathCopy(input: string): string {
+const FORMAT_MATH_CACHE_LIMIT = 1024;
+const formatMathCache = new Map<string, string>();
+
+function formatMathCopyUncached(input: string): string {
   const piecewise = formatPiecewiseExpression(input);
   if (piecewise) {
     return piecewise;
@@ -797,6 +802,26 @@ function formatMathCopy(input: string): string {
   return formatted;
 }
 
+function formatMathCopy(input: string): string {
+  const cached = formatMathCache.get(input);
+  if (cached !== undefined) {
+    if (formatMathCache.size > 1) {
+      formatMathCache.delete(input);
+      formatMathCache.set(input, cached);
+    }
+    return cached;
+  }
+  const formatted = formatMathCopyUncached(input);
+  if (formatMathCache.size >= FORMAT_MATH_CACHE_LIMIT) {
+    const oldestKey = formatMathCache.keys().next().value;
+    if (oldestKey !== undefined) {
+      formatMathCache.delete(oldestKey);
+    }
+  }
+  formatMathCache.set(input, formatted);
+  return formatted;
+}
+
 function formatNow(): string {
   return new Intl.DateTimeFormat('en-US', {
     timeZone: snapshot?.settings.timezone,
@@ -811,6 +836,111 @@ function describeError(error: unknown): string {
     return error.message;
   }
   return 'Unexpected error.';
+}
+
+type IpcFailurePayload = { ok: false; error: { code: string; message: string } };
+
+function isIpcFailure(value: unknown): value is IpcFailurePayload {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+  const candidate = value as { ok?: unknown; error?: unknown; view?: unknown };
+  if (candidate.ok !== false) {
+    return false;
+  }
+  if (candidate.view !== undefined) {
+    return false;
+  }
+  if (!candidate.error || typeof candidate.error !== 'object') {
+    return false;
+  }
+  const errorCandidate = candidate.error as { code?: unknown; message?: unknown };
+  return typeof errorCandidate.message === 'string' && typeof errorCandidate.code === 'string';
+}
+
+function describeIpcFailure(failure: IpcFailurePayload): string {
+  if (failure.error.code === 'timeout') {
+    return failure.error.message;
+  }
+  return failure.error.message;
+}
+
+class IpcInvocationError extends Error {
+  readonly code: string;
+  constructor(code: string, message: string) {
+    super(message);
+    this.name = 'IpcInvocationError';
+    this.code = code;
+  }
+}
+
+async function invokeIpc<T>(action: string, fn: () => Promise<unknown>): Promise<T> {
+  const result = await fn();
+  if (isIpcFailure(result)) {
+    throw new IpcInvocationError(result.error.code, result.error.message);
+  }
+  return result as T;
+}
+
+function handleActionError(action: string, error: unknown): void {
+  if (error instanceof IpcInvocationError) {
+    if (error.code === 'timeout') {
+      setBanner(`${error.message} You can try again when the proxy responds.`);
+      return;
+    }
+    setBanner(error.message);
+    return;
+  }
+  setBanner(`Action failed. ${describeError(error)}`);
+}
+
+const inFlightActions = new Set<string>();
+
+function isActionInFlight(actionKey: string): boolean {
+  return inFlightActions.has(actionKey);
+}
+
+function setActionLoading(button: HTMLButtonElement | null, loading: boolean): void {
+  if (!button) {
+    return;
+  }
+  if (loading) {
+    button.classList.add('is-loading');
+    button.dataset.loading = '1';
+    button.setAttribute('aria-busy', 'true');
+    button.disabled = true;
+  } else {
+    button.classList.remove('is-loading');
+    delete button.dataset.loading;
+    button.removeAttribute('aria-busy');
+    if (button.dataset.loadingPriorDisabled === '1') {
+      button.disabled = true;
+    } else {
+      button.disabled = false;
+    }
+    delete button.dataset.loadingPriorDisabled;
+  }
+}
+
+async function withLoadingAction<T>(
+  actionKey: string,
+  button: HTMLButtonElement | null,
+  fn: () => Promise<T>
+): Promise<T | undefined> {
+  if (inFlightActions.has(actionKey)) {
+    return undefined;
+  }
+  inFlightActions.add(actionKey);
+  if (button) {
+    button.dataset.loadingPriorDisabled = button.disabled ? '1' : '0';
+  }
+  setActionLoading(button, true);
+  try {
+    return await fn();
+  } finally {
+    inFlightActions.delete(actionKey);
+    setActionLoading(button, false);
+  }
 }
 
 function setBanner(message: string): void {
@@ -967,6 +1097,38 @@ function documentStatusLabel(document: QuestionBankDocument): string {
 
 function renderBanner(): string {
   return bannerMessage ? `<div class="status-banner" role="status" aria-live="polite">${escapeHtml(bannerMessage)}</div>` : '';
+}
+
+type EmptyStateAction = {
+  label: string;
+  action: string;
+  style?: 'primary' | 'secondary';
+};
+
+type EmptyStateOptions = {
+  title?: string;
+  body?: string;
+  bodyHtml?: string;
+  action?: EmptyStateAction;
+  view?: string;
+};
+
+function renderEmptyState(options: EmptyStateOptions): string {
+  const titleHtml = options.title ? `<h2 class="title-serif">${escapeHtml(options.title)}</h2>` : '';
+  const bodyHtml = options.bodyHtml
+    ? options.bodyHtml
+    : options.body
+      ? `<p class="subtle">${escapeHtml(options.body)}</p>`
+      : '';
+  const actionHtml = options.action
+    ? `<div class="actions"><button class="${options.action.style ?? 'primary'}" data-action="${escapeHtml(options.action.action)}">${escapeHtml(options.action.label)}</button></div>`
+    : '';
+  const viewAttr = options.view ? ` data-view="${escapeHtml(options.view)}"` : '';
+  return `<section class="empty-state"${viewAttr}>${titleHtml}${bodyHtml}${actionHtml}</section>`;
+}
+
+function renderLoadingState(label: string): string {
+  return `<section class="loading-state" role="status" aria-live="polite">${escapeHtml(label)}</section>`;
 }
 
 function createElementFromHtml<T extends Element>(html: string): T {
@@ -1340,7 +1502,7 @@ function renderDocumentLibrary(questionBankValue: QuestionBankView | null): stri
                       data-document-id="${document.id}"
                     />
                     <div class="document-copy">
-                      <strong>${escapeHtml(document.fileName)}</strong>
+                      <strong title="${escapeHtml(document.fileName)}">${escapeHtml(document.fileName)}</strong>
                       <span class="small-copy">${escapeHtml(document.kind.toUpperCase())} • ${escapeHtml(documentStatusLabel(document))}</span>
                     </div>
                   </label>`
@@ -1455,7 +1617,7 @@ function renderDraftCard(draft: GeneratedQuestionDraft): string {
     <article class="question-card draft-card" data-draft-card="${draft.id}">
       <div class="question-top">
         <div>
-          <h3 class="question-title">${escapeHtml(draft.title || 'Untitled draft')}</h3>
+          <h3 class="question-title" title="${escapeHtml(draft.title || 'Untitled draft')}">${escapeHtml(draft.title || 'Untitled draft')}</h3>
           <div class="inline-stack">
             <span class="badge">${escapeHtml(draft.selectionBucket)}</span>
             <span class="badge">${escapeHtml(draft.promptType)}</span>
@@ -1568,7 +1730,11 @@ function renderDraftReviewSection(questionBankValue: QuestionBankView | null): s
         ? '<p class="small-copy">No draft batches yet.</p>'
         : draftGroups
             .map(
-              ({ batch, drafts: batchDrafts }) => `
+              ({ batch, drafts: batchDrafts }) => {
+                const expanded = expandedDraftBatches.has(batch.id);
+                const overflow = Math.max(0, batchDrafts.length - DRAFT_BATCH_PREVIEW_LIMIT);
+                const visibleDrafts = expanded || overflow === 0 ? batchDrafts : batchDrafts.slice(0, DRAFT_BATCH_PREVIEW_LIMIT);
+                return `
                 <section class="draft-batch">
                   <div class="question-top">
                     <div>
@@ -1596,9 +1762,15 @@ function renderDraftReviewSection(questionBankValue: QuestionBankView | null): s
                     </div>
                   </div>
                   <div class="draft-list">
-                    ${batchDrafts.map((draft) => renderDraftCard(draft)).join('')}
+                    ${visibleDrafts.map((draft) => renderDraftCard(draft)).join('')}
                   </div>
-                </section>`
+                  ${overflow > 0
+                    ? `<div class="actions" style="margin-top: 12px;">
+                        <button class="secondary" data-action="toggle-batch-expand" data-batch-id="${batch.id}">${expanded ? 'Show fewer drafts' : `Show all ${batchDrafts.length} drafts (${overflow} more)`}</button>
+                      </div>`
+                    : ''}
+                </section>`;
+              }
             )
             .join('')}
     </section>
@@ -1631,7 +1803,7 @@ function renderPublishedLibrary(questionBankValue: QuestionBankView | null): str
                 (question) => `
                   <div class="published-item">
                     <div>
-                      <strong>${escapeHtml(question.title)}</strong>
+                      <strong title="${escapeHtml(question.title)}">${escapeHtml(question.title)}</strong>
                       <div class="small-copy">${escapeHtml(question.topicLabel)} • ${escapeHtml(question.selectionBucket)}</div>
                     </div>
                     <button class="secondary" data-action="archive-published" data-published-id="${question.bankQuestionId}">Archive</button>
@@ -1868,15 +2040,12 @@ function renderPracticeHero(snapshotValue: AppSnapshot): string {
 }
 
 function renderPracticeEmptyState(): string {
-  return `
-    <section class="empty-state" data-view="practice-empty">
-      <h2 class="title-serif">No active session</h2>
-      <p class="subtle">This window will reopen automatically when the next practice slot becomes due.</p>
-      <div class="actions" style="justify-content: center;">
-        <button class="primary" data-action="open-dashboard">Open dashboard</button>
-      </div>
-    </section>
-  `;
+  return renderEmptyState({
+    view: 'practice-empty',
+    title: 'No active session',
+    body: 'This window will reopen automatically when the next practice slot becomes due.',
+    action: { label: 'Open dashboard', action: 'open-dashboard' }
+  });
 }
 
 function renderPractice(snapshotValue: AppSnapshot): string {
@@ -2028,8 +2197,11 @@ function render(): void {
   clockElement.textContent = formatNow();
   if (!snapshot) {
     appElement.innerHTML = initializationError
-      ? `<section class="empty-state"><p class="subtle">${escapeHtml(initializationError)}</p><div class="actions" style="justify-content: center;"><button class="primary" data-action="retry-load">Retry loading state</button></div></section>`
-      : '<section class="empty-state"><p class="subtle">Loading application state...</p></section>';
+      ? renderEmptyState({
+          body: initializationError,
+          action: { label: 'Retry loading state', action: 'retry-load' }
+        })
+      : renderLoadingState('Loading application state…');
     renderedSnapshot = null;
     return;
   }
@@ -2187,7 +2359,23 @@ appElement?.addEventListener('click', async (event) => {
         setBanner('State reloaded.');
       }
     } catch (error) {
-      setBanner(`Action failed. ${describeError(error)}`);
+      handleActionError('retry-load', error);
+    }
+    return;
+  }
+
+  if (action === 'toggle-batch-expand') {
+    const batchId = button.dataset.batchId;
+    if (!batchId) {
+      return;
+    }
+    if (expandedDraftBatches.has(batchId)) {
+      expandedDraftBatches.delete(batchId);
+    } else {
+      expandedDraftBatches.add(batchId);
+    }
+    if (mode === 'dashboard' && snapshot) {
+      replaceSection('dashboard-drafts', renderDraftReviewSection(questionBankView));
     }
     return;
   }
@@ -2196,15 +2384,31 @@ appElement?.addEventListener('click', async (event) => {
     return;
   }
 
+  const longRunningKey = (() => {
+    if (action === 'import-documents') return 'import-documents';
+    if (action === 'generate-drafts') return 'generate-drafts';
+    if (action === 'publish-draft' && button.dataset.draftId) return `publish-draft:${button.dataset.draftId}`;
+    if (action === 'publish-batch' && button.dataset.batchId) return `publish-batch:${button.dataset.batchId}`;
+    if (action === 'discard-batch' && button.dataset.batchId) return `discard-batch:${button.dataset.batchId}`;
+    if (action === 'save-draft' && button.dataset.draftId) return `save-draft:${button.dataset.draftId}`;
+    if (action === 'delete-draft' && button.dataset.draftId) return `delete-draft:${button.dataset.draftId}`;
+    if (action === 'archive-published' && button.dataset.publishedId) return `archive-published:${button.dataset.publishedId}`;
+    return null;
+  })();
+
+  if (longRunningKey && isActionInFlight(longRunningKey)) {
+    return;
+  }
+
   try {
     if (action === 'open-practice') {
-      await window.calcTrainer.openPractice();
+      await invokeIpc('open-practice', () => window.calcTrainer.openPractice());
       setBanner('Practice window brought to the front.');
       return;
     }
 
     if (action === 'open-dashboard') {
-      await window.calcTrainer.openDashboard();
+      await invokeIpc('open-dashboard', () => window.calcTrainer.openDashboard());
       setBanner('Dashboard refreshed.');
       return;
     }
@@ -2222,7 +2426,9 @@ appElement?.addEventListener('click', async (event) => {
       if (!enforcementStyle || snapshot.settings.enforcementStyle === enforcementStyle) {
         return;
       }
-      applySnapshot(await window.calcTrainer.updateSettings({ enforcementStyle }) as AppSnapshot);
+      applySnapshot(await invokeIpc<AppSnapshot>('set-enforcement-style', () =>
+        window.calcTrainer.updateSettings({ enforcementStyle })
+      ));
       setBanner(`Enforcement style set to ${enforcementStyle}.`);
       return;
     }
@@ -2232,7 +2438,9 @@ appElement?.addEventListener('click', async (event) => {
       if (!questionSourceMode || snapshot.settings.questionSourceMode === questionSourceMode) {
         return;
       }
-      applySnapshot(await window.calcTrainer.updateSettings({ questionSourceMode }) as AppSnapshot);
+      applySnapshot(await invokeIpc<AppSnapshot>('set-question-source', () =>
+        window.calcTrainer.updateSettings({ questionSourceMode })
+      ));
       setBanner(`Question source set to ${questionSourceMode}.`);
       return;
     }
@@ -2244,13 +2452,20 @@ appElement?.addEventListener('click', async (event) => {
         setBanner('Enter a numeric lighter reopen delay between 1 and 30 minutes.');
         return;
       }
-      applySnapshot(await window.calcTrainer.updateSettings({ lighterReopenDelayMinutes }) as AppSnapshot);
+      applySnapshot(await invokeIpc<AppSnapshot>('save-lighter-delay', () =>
+        window.calcTrainer.updateSettings({ lighterReopenDelayMinutes })
+      ));
       setBanner(`Lighter reopen delay set to ${snapshot.settings.lighterReopenDelayMinutes} minute${snapshot.settings.lighterReopenDelayMinutes === 1 ? '' : 's'}.`);
       return;
     }
 
     if (action === 'import-documents') {
-      const result = await window.calcTrainer.importDocuments() as QuestionBankMutationResult;
+      const result = await withLoadingAction('import-documents', button, () =>
+        invokeIpc<QuestionBankMutationResult>('import-documents', () => window.calcTrainer.importDocuments())
+      );
+      if (!result) {
+        return;
+      }
       if (result.ok) {
         clearAllDraftEditValues();
       }
@@ -2259,9 +2474,14 @@ appElement?.addEventListener('click', async (event) => {
     }
 
     if (action === 'generate-drafts') {
-      const result = await window.calcTrainer.generateDraftBatch({
-        documentIds: [...selectedDocumentIds]
-      }) as QuestionBankMutationResult;
+      const result = await withLoadingAction('generate-drafts', button, () =>
+        invokeIpc<QuestionBankMutationResult>('generate-drafts', () =>
+          window.calcTrainer.generateDraftBatch({ documentIds: [...selectedDocumentIds] })
+        )
+      );
+      if (!result) {
+        return;
+      }
       if (result.ok) {
         clearAllDraftEditValues();
       }
@@ -2279,10 +2499,12 @@ appElement?.addEventListener('click', async (event) => {
         setBanner('Draft form is unavailable.');
         return;
       }
-      const result = await window.calcTrainer.updateDraft({
-        draftId,
-        fields
-      }) as QuestionBankMutationResult;
+      const result = await withLoadingAction(`save-draft:${draftId}`, button, () =>
+        invokeIpc<QuestionBankMutationResult>('save-draft', () => window.calcTrainer.updateDraft({ draftId, fields }))
+      );
+      if (!result) {
+        return;
+      }
       if (result.ok) {
         clearDraftEditValues(draftId);
       }
@@ -2295,7 +2517,12 @@ appElement?.addEventListener('click', async (event) => {
       if (!draftId) {
         return;
       }
-      const result = await window.calcTrainer.deleteDraft({ draftId }) as QuestionBankMutationResult;
+      const result = await withLoadingAction(`delete-draft:${draftId}`, button, () =>
+        invokeIpc<QuestionBankMutationResult>('delete-draft', () => window.calcTrainer.deleteDraft({ draftId }))
+      );
+      if (!result) {
+        return;
+      }
       if (result.ok) {
         clearDraftEditValues(draftId);
       }
@@ -2308,7 +2535,12 @@ appElement?.addEventListener('click', async (event) => {
       if (!draftId) {
         return;
       }
-      const result = await window.calcTrainer.publishDrafts({ draftIds: [draftId] }) as QuestionBankMutationResult;
+      const result = await withLoadingAction(`publish-draft:${draftId}`, button, () =>
+        invokeIpc<QuestionBankMutationResult>('publish-draft', () => window.calcTrainer.publishDrafts({ draftIds: [draftId] }))
+      );
+      if (!result) {
+        return;
+      }
       if (result.ok) {
         clearDraftEditValues(draftId);
       }
@@ -2328,7 +2560,12 @@ appElement?.addEventListener('click', async (event) => {
         setBanner('No valid drafts remain in this batch.');
         return;
       }
-      const result = await window.calcTrainer.publishDrafts({ draftIds: validDraftIds }) as QuestionBankMutationResult;
+      const result = await withLoadingAction(`publish-batch:${batchId}`, button, () =>
+        invokeIpc<QuestionBankMutationResult>('publish-batch', () => window.calcTrainer.publishDrafts({ draftIds: validDraftIds }))
+      );
+      if (!result) {
+        return;
+      }
       if (result.ok) {
         for (const validDraftId of validDraftIds) {
           clearDraftEditValues(validDraftId);
@@ -2343,7 +2580,12 @@ appElement?.addEventListener('click', async (event) => {
       if (!batchId) {
         return;
       }
-      const result = await window.calcTrainer.deleteDraft({ batchId }) as QuestionBankMutationResult;
+      const result = await withLoadingAction(`discard-batch:${batchId}`, button, () =>
+        invokeIpc<QuestionBankMutationResult>('discard-batch', () => window.calcTrainer.deleteDraft({ batchId }))
+      );
+      if (!result) {
+        return;
+      }
       if (result.ok) {
         clearDraftEditValuesForBatch(batchId);
       }
@@ -2356,7 +2598,15 @@ appElement?.addEventListener('click', async (event) => {
       if (!publishedQuestionId) {
         return;
       }
-      applyQuestionBankResult(await window.calcTrainer.archivePublished({ questionIds: [publishedQuestionId] }) as QuestionBankMutationResult);
+      const result = await withLoadingAction(`archive-published:${publishedQuestionId}`, button, () =>
+        invokeIpc<QuestionBankMutationResult>('archive-published', () =>
+          window.calcTrainer.archivePublished({ questionIds: [publishedQuestionId] })
+        )
+      );
+      if (!result) {
+        return;
+      }
+      applyQuestionBankResult(result);
       return;
     }
 
@@ -2365,9 +2615,9 @@ appElement?.addEventListener('click', async (event) => {
     }
 
     if (action === 'complete-session') {
-      const result = await window.calcTrainer.completeSession({
-        sessionId: snapshot.activeSession.id
-      }) as { ok: boolean; reason?: string; snapshot: AppSnapshot };
+      const result = await invokeIpc<{ ok: boolean; reason?: string; snapshot: AppSnapshot }>('complete-session', () =>
+        window.calcTrainer.completeSession({ sessionId: snapshot!.activeSession!.id })
+      );
       applySnapshot(result.snapshot);
       setBanner(result.ok ? 'Session completed.' : (result.reason ?? 'Session cannot be completed yet.'));
       return;
@@ -2383,21 +2633,25 @@ appElement?.addEventListener('click', async (event) => {
         setBanner('Enter an answer before submitting.');
         return;
       }
-      const result = await window.calcTrainer.submitAnswer({
-        sessionId: snapshot.activeSession.id,
-        questionId,
-        answerText
-      }) as { snapshot: AppSnapshot };
+      const result = await invokeIpc<{ snapshot: AppSnapshot }>('submit-answer', () =>
+        window.calcTrainer.submitAnswer({
+          sessionId: snapshot!.activeSession!.id,
+          questionId,
+          answerText
+        })
+      );
       snapshot = result.snapshot;
       render();
       return;
     }
 
     if (action === 'reveal-solution') {
-      snapshot = await window.calcTrainer.revealSolution({
-        sessionId: snapshot.activeSession.id,
-        questionId
-      }) as AppSnapshot;
+      snapshot = await invokeIpc<AppSnapshot>('reveal-solution', () =>
+        window.calcTrainer.revealSolution({
+          sessionId: snapshot!.activeSession!.id,
+          questionId
+        })
+      );
       render();
       return;
     }
@@ -2407,16 +2661,18 @@ appElement?.addEventListener('click', async (event) => {
       if (!rating) {
         return;
       }
-      snapshot = await window.calcTrainer.selfCheck({
-        sessionId: snapshot.activeSession.id,
-        questionId,
-        rating
-      }) as AppSnapshot;
+      snapshot = await invokeIpc<AppSnapshot>('self-check', () =>
+        window.calcTrainer.selfCheck({
+          sessionId: snapshot!.activeSession!.id,
+          questionId,
+          rating
+        })
+      );
       render();
       return;
     }
   } catch (error) {
-    setBanner(`Action failed. ${describeError(error)}`);
+    handleActionError(action ?? 'unknown', error);
   }
 });
 

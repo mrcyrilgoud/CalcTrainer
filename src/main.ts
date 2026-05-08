@@ -16,13 +16,14 @@ import {
   buildQuestionBankView,
   buildTopicLabelMap,
   createDefaultQuestionBankState,
+  createQuestionBankPersistScheduler,
   deleteDraftFromQuestionBank,
   generateDraftBatch,
   getQuestionBankFilePath as resolveQuestionBankFilePath,
   importQuestionBankFiles,
   loadQuestionBankFile,
   publishDraftsInQuestionBank,
-  saveQuestionBankFile,
+  type QuestionBankPersistScheduler,
   updateDraftInQuestionBank
 } from './shared/question-bank-storage';
 import { buildSnapshot, slimDownSnapshot, SnapshotPayloadStyle } from './shared/selectors';
@@ -36,8 +37,65 @@ import {
   revealWorkedSolution,
   submitAnswer
 } from './shared/practice';
-import { createDefaultState, loadStateFile, saveStateFile } from './shared/storage';
+import { createDefaultState, createStatePersistScheduler, loadStateFile, type StatePersistScheduler } from './shared/storage';
 import { AppSettings, AppSnapshot, AppState, DraftQuestionFields, QuestionBankState, SelfCheckRating } from './shared/types';
+
+const DRAFT_GENERATION_TIMEOUT_MS = (() => {
+  const fromEnv = Number.parseInt(process.env.CALCTRAINER_DRAFT_GENERATION_TIMEOUT_MS ?? '', 10);
+  return Number.isFinite(fromEnv) && fromEnv > 0 ? fromEnv : 120_000;
+})();
+
+class TimeoutError extends Error {
+  readonly code = 'timeout';
+  constructor(message: string) {
+    super(message);
+    this.name = 'TimeoutError';
+  }
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      reject(new TimeoutError(`${label} timed out after ${Math.round(timeoutMs / 1000)} seconds.`));
+    }, timeoutMs);
+  });
+  return Promise.race([promise, timeoutPromise]).finally(() => {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }) as Promise<T>;
+}
+
+function classifyError(error: unknown): { code: string; message: string } {
+  if (error instanceof TimeoutError) {
+    return { code: 'timeout', message: error.message };
+  }
+  if (error instanceof Error) {
+    const message = error.message.trim().length > 0 ? error.message : 'Unexpected error.';
+    return { code: error.name || 'error', message };
+  }
+  return { code: 'error', message: 'Unexpected error.' };
+}
+
+type IpcFailure = { ok: false; error: { code: string; message: string } };
+
+function ipcFailure(error: unknown): IpcFailure {
+  return { ok: false, error: classifyError(error) };
+}
+
+function wrapHandler<TArgs extends unknown[], TResult>(
+  handler: (event: Electron.IpcMainInvokeEvent, ...args: TArgs) => Promise<TResult> | TResult
+): (event: Electron.IpcMainInvokeEvent, ...args: TArgs) => Promise<TResult | IpcFailure> {
+  return async (event, ...args) => {
+    try {
+      return await handler(event, ...args);
+    } catch (error) {
+      console.error('CalcTrainer IPC handler failed.', error);
+      return ipcFailure(error);
+    }
+  };
+}
 
 let dashboardWindow: BrowserWindow | null = null;
 let practiceWindow: BrowserWindow | null = null;
@@ -46,6 +104,10 @@ let questionBankState: QuestionBankState = createDefaultQuestionBankState();
 let isQuitting = false;
 let reopenTimer: NodeJS.Timeout | null = null;
 let reminderInterval: NodeJS.Timeout | null = null;
+let statePersistScheduler: StatePersistScheduler | null = null;
+let questionBankPersistScheduler: QuestionBankPersistScheduler | null = null;
+type DraftGenerationLock = { abandoned: boolean };
+let activeDraftGeneration: DraftGenerationLock | null = null;
 const userDataOverride = process.env.CALCTRAINER_USER_DATA_DIR?.trim();
 const shouldRegisterLoginItem = process.env.CALCTRAINER_DISABLE_LOGIN_ITEM !== '1';
 
@@ -74,20 +136,42 @@ function snapshotStyleForWebContents(webContentsId: number): SnapshotPayloadStyl
 }
 
 function buildSnapshotNowForWebContents(webContentsId: number): AppSnapshot {
-  return buildSnapshot(appState, new Date(), snapshotStyleForWebContents(webContentsId), {
-    topicLabels: buildTopicLabelMap(questionBankState)
-  });
+  const now = new Date();
+  const topicLabels = buildTopicLabelMap(questionBankState);
+  return snapshotStyleForWebContents(webContentsId) === 'full'
+    ? getCachedFullSnapshot(now, topicLabels)
+    : getCachedSlimSnapshot(now, topicLabels);
 }
 
 function getSettings(): AppSettings {
   return appState.settings;
 }
 
+function ensureStateScheduler(): StatePersistScheduler {
+  if (!statePersistScheduler) {
+    statePersistScheduler = createStatePersistScheduler(getStateFilePath());
+  }
+  return statePersistScheduler;
+}
+
+function ensureQuestionBankScheduler(): QuestionBankPersistScheduler {
+  if (!questionBankPersistScheduler) {
+    questionBankPersistScheduler = createQuestionBankPersistScheduler(getQuestionBankStateFilePath());
+  }
+  return questionBankPersistScheduler;
+}
+
+function flushPendingWrites(): void {
+  statePersistScheduler?.flush();
+  questionBankPersistScheduler?.flush();
+}
+
 function persistStateIfChanged(previousState: AppState, options: { skipWebContentsId?: number } = {}): void {
   if (previousState === appState) {
     return;
   }
-  saveStateFile(getStateFilePath(), appState);
+  ensureStateScheduler().schedule(appState);
+  invalidateSnapshotCache();
   broadcastSnapshot(options);
 }
 
@@ -95,33 +179,70 @@ function persistQuestionBankIfChanged(previousState: QuestionBankState, options:
   if (previousState === questionBankState) {
     return;
   }
-  saveQuestionBankFile(getQuestionBankStateFilePath(), questionBankState);
+  ensureQuestionBankScheduler().schedule(questionBankState);
+  invalidateSnapshotCache();
   broadcastSnapshot(options);
+}
+
+type SnapshotCacheEntry = {
+  appStateRef: AppState;
+  questionBankStateRef: QuestionBankState;
+  timeBucket: number;
+  full: AppSnapshot | null;
+  slim: AppSnapshot | null;
+};
+
+let snapshotCache: SnapshotCacheEntry | null = null;
+
+function invalidateSnapshotCache(): void {
+  snapshotCache = null;
+}
+
+function getSnapshotCacheEntry(now: Date): SnapshotCacheEntry {
+  const timeBucket = Math.floor(now.getTime() / 1000);
+  if (
+    snapshotCache
+    && snapshotCache.appStateRef === appState
+    && snapshotCache.questionBankStateRef === questionBankState
+    && snapshotCache.timeBucket === timeBucket
+  ) {
+    return snapshotCache;
+  }
+  snapshotCache = {
+    appStateRef: appState,
+    questionBankStateRef: questionBankState,
+    timeBucket,
+    full: null,
+    slim: null
+  };
+  return snapshotCache;
+}
+
+function getCachedFullSnapshot(now: Date, topicLabels: Record<string, string>): AppSnapshot {
+  const entry = getSnapshotCacheEntry(now);
+  if (!entry.full) {
+    entry.full = buildSnapshot(appState, now, 'full', { topicLabels });
+  }
+  return entry.full;
+}
+
+function getCachedSlimSnapshot(now: Date, topicLabels: Record<string, string>): AppSnapshot {
+  const entry = getSnapshotCacheEntry(now);
+  if (!entry.slim) {
+    entry.slim = slimDownSnapshot(getCachedFullSnapshot(now, topicLabels));
+  }
+  return entry.slim;
 }
 
 function broadcastSnapshot(options: { skipWebContentsId?: number } = {}): void {
   const now = new Date();
   const topicLabels = buildTopicLabelMap(questionBankState);
-  let fullSnapshot: AppSnapshot | null = null;
-  let slimSnapshot: AppSnapshot | null = null;
-
-  const getFullSnapshot = (): AppSnapshot => {
-    if (!fullSnapshot) {
-      fullSnapshot = buildSnapshot(appState, now, 'full', { topicLabels });
-    }
-    return fullSnapshot;
-  };
-
-  const getSlimSnapshot = (): AppSnapshot => {
-    if (!slimSnapshot) {
-      slimSnapshot = slimDownSnapshot(getFullSnapshot());
-    }
-    return slimSnapshot;
-  };
 
   for (const candidate of [dashboardWindow, practiceWindow]) {
     if (candidate && !candidate.isDestroyed() && candidate.webContents.id !== options.skipWebContentsId) {
-      const payload = isPracticeWindowWebContents(candidate.webContents.id) ? getFullSnapshot() : getSlimSnapshot();
+      const payload = isPracticeWindowWebContents(candidate.webContents.id)
+        ? getCachedFullSnapshot(now, topicLabels)
+        : getCachedSlimSnapshot(now, topicLabels);
       candidate.webContents.send('snapshot:updated', payload);
     }
   }
@@ -232,13 +353,16 @@ async function createPracticeWindow(options: { activate?: boolean } = {}): Promi
 
   practiceWindow.on('close', (event) => {
     if (isQuitting) {
+      flushPendingWrites();
       return;
     }
     const activeSession = getActiveSession(appState);
     if (!activeSession) {
+      flushPendingWrites();
       return;
     }
     event.preventDefault();
+    flushPendingWrites();
     hidePracticeWindowForEnforcement();
   });
 
@@ -318,23 +442,23 @@ function buildQuestionBankResult(message: string, ok = true) {
 }
 
 function registerIpc(): void {
-  ipcMain.handle('snapshot:get', (event) => buildSnapshotNowForWebContents(event.sender.id));
-  ipcMain.handle('questionBank:get', () => buildQuestionBankView(questionBankState));
-  ipcMain.handle('dashboard:open', async (event) => {
+  ipcMain.handle('snapshot:get', wrapHandler((event) => buildSnapshotNowForWebContents(event.sender.id)));
+  ipcMain.handle('questionBank:get', wrapHandler(() => buildQuestionBankView(questionBankState)));
+  ipcMain.handle('dashboard:open', wrapHandler(async (event) => {
     await createDashboardWindow();
     return buildSnapshotNowForWebContents(event.sender.id);
-  });
-  ipcMain.handle('practice:open', async (event) => {
+  }));
+  ipcMain.handle('practice:open', wrapHandler(async (event) => {
     await createPracticeWindow({ activate: true });
     return buildSnapshotNowForWebContents(event.sender.id);
-  });
-  ipcMain.handle('practice:hide', (event) => {
+  }));
+  ipcMain.handle('practice:hide', wrapHandler((event) => {
     hidePracticeWindowForEnforcement();
     return buildSnapshotNowForWebContents(event.sender.id);
-  });
+  }));
   ipcMain.handle(
     'settings:update',
-    (
+    wrapHandler((
       event,
       payload: Partial<Pick<AppSettings, 'enforcementStyle' | 'lighterReopenDelayMinutes' | 'questionSourceMode'>>
     ) => {
@@ -358,9 +482,9 @@ function registerIpc(): void {
         practiceWindow.setAlwaysOnTop(keepOnTop, keepOnTop ? 'floating' : 'normal');
       }
       return buildSnapshotNowForWebContents(event.sender.id);
-    }
+    })
   );
-  ipcMain.handle('questionBank:importDocuments', async (event) => {
+  ipcMain.handle('questionBank:importDocuments', wrapHandler(async (event) => {
     const ownerWindow = BrowserWindow.fromWebContents(event.sender) ?? dashboardWindow ?? undefined;
     const dialogOptions: OpenDialogOptions = {
       properties: ['openFile', 'multiSelections'],
@@ -394,22 +518,56 @@ function registerIpc(): void {
       messages.push(`Extraction failed for: ${importResult.extractionFailures.join(', ')}.`);
     }
     return buildQuestionBankResult(messages.join(' '), true);
-  });
-  ipcMain.handle('questionBank:generateDraftBatch', async (event, payload: { documentIds: string[] }) => {
-    const result = await generateDraftBatch(
+  }));
+  ipcMain.handle('questionBank:generateDraftBatch', wrapHandler(async (event, payload: { documentIds: string[] }) => {
+    if (activeDraftGeneration) {
+      throw new Error('Draft generation is already in progress. Wait for the current run to finish.');
+    }
+    const generation: DraftGenerationLock = { abandoned: false };
+    activeDraftGeneration = generation;
+
+    const generationPromise = generateDraftBatch(
       questionBankState,
       app.getPath('userData'),
       payload.documentIds ?? [],
       new Date(),
       {
         onStateChange: (nextState) => {
+          if (generation.abandoned) {
+            return;
+          }
           const previousQuestionBankState = questionBankState;
           questionBankState = nextState;
           persistQuestionBankIfChanged(previousQuestionBankState, { skipWebContentsId: event.sender.id });
         }
       }
     );
-    if (questionBankState !== result.state) {
+
+    // Hold the lock until the underlying generation truly settles, so a
+    // second request cannot start while a timed-out generation is still running.
+    const releaseLock = (): void => {
+      if (activeDraftGeneration === generation) {
+        activeDraftGeneration = null;
+      }
+    };
+    generationPromise.then(releaseLock, releaseLock);
+
+    let result: Awaited<typeof generationPromise>;
+    try {
+      result = await withTimeout(generationPromise, DRAFT_GENERATION_TIMEOUT_MS, 'Draft generation');
+    } catch (error) {
+      if (error instanceof TimeoutError) {
+        // Mark the in-flight generation as abandoned so any further
+        // onStateChange callbacks (and the eventual terminal result) are
+        // discarded rather than overwriting newer state.
+        generation.abandoned = true;
+      } else {
+        releaseLock();
+      }
+      throw error;
+    }
+
+    if (!generation.abandoned && questionBankState !== result.state) {
       const previousQuestionBankState = questionBankState;
       questionBankState = result.state;
       persistQuestionBankIfChanged(previousQuestionBankState, { skipWebContentsId: event.sender.id });
@@ -419,8 +577,8 @@ function registerIpc(): void {
         ?? `Generated ${result.generatedCount} draft question${result.generatedCount === 1 ? '' : 's'} in batch ${result.batchId || 'n/a'}.`,
       result.status !== 'generation_failed'
     );
-  });
-  ipcMain.handle('questionBank:updateDraft', (event, payload: { draftId: string; fields: Partial<DraftQuestionFields> }) => {
+  }));
+  ipcMain.handle('questionBank:updateDraft', wrapHandler((event, payload: { draftId: string; fields: Partial<DraftQuestionFields> }) => {
     const previousQuestionBankState = questionBankState;
     const result = updateDraftInQuestionBank(
       questionBankState,
@@ -437,15 +595,15 @@ function registerIpc(): void {
         : 'Draft saved.',
       result.updated
     );
-  });
-  ipcMain.handle('questionBank:deleteDraft', (event, payload: { draftId?: string; batchId?: string }) => {
+  }));
+  ipcMain.handle('questionBank:deleteDraft', wrapHandler((event, payload: { draftId?: string; batchId?: string }) => {
     const previousQuestionBankState = questionBankState;
     const result = deleteDraftFromQuestionBank(questionBankState, payload ?? {}, new Date());
     questionBankState = result.state;
     persistQuestionBankIfChanged(previousQuestionBankState, { skipWebContentsId: event.sender.id });
     return buildQuestionBankResult(`Removed ${result.deletedCount} draft question${result.deletedCount === 1 ? '' : 's'}.`, result.deletedCount > 0);
-  });
-  ipcMain.handle('questionBank:publishDrafts', (event, payload: { draftIds: string[] }) => {
+  }));
+  ipcMain.handle('questionBank:publishDrafts', wrapHandler((event, payload: { draftIds: string[] }) => {
     const previousQuestionBankState = questionBankState;
     const result = publishDraftsInQuestionBank(questionBankState, payload.draftIds ?? [], new Date());
     questionBankState = result.state;
@@ -455,8 +613,8 @@ function registerIpc(): void {
       `Published ${result.publishedCount} question${result.publishedCount === 1 ? '' : 's'}.${skippedSuffix}`,
       result.publishedCount > 0
     );
-  });
-  ipcMain.handle('questionBank:archivePublished', (event, payload: { questionIds: string[] }) => {
+  }));
+  ipcMain.handle('questionBank:archivePublished', wrapHandler((event, payload: { questionIds: string[] }) => {
     const previousQuestionBankState = questionBankState;
     const result = archivePublishedQuestions(questionBankState, payload.questionIds ?? [], new Date());
     questionBankState = result.state;
@@ -465,8 +623,8 @@ function registerIpc(): void {
       `Archived ${result.archivedCount} published question${result.archivedCount === 1 ? '' : 's'}.`,
       result.archivedCount > 0
     );
-  });
-  ipcMain.handle('session:submit-answer', (event, payload: { sessionId: string; questionId: string; answerText: string }) => {
+  }));
+  ipcMain.handle('session:submit-answer', wrapHandler((event, payload: { sessionId: string; questionId: string; answerText: string }) => {
     const previousState = appState;
     const result = submitAnswer(appState, payload.sessionId, payload.questionId, payload.answerText, new Date());
     appState = result.state;
@@ -475,20 +633,20 @@ function registerIpc(): void {
       evaluation: result.evaluation,
       snapshot: buildSnapshotNowForWebContents(event.sender.id)
     };
-  });
-  ipcMain.handle('session:reveal-solution', (event, payload: { sessionId: string; questionId: string }) => {
+  }));
+  ipcMain.handle('session:reveal-solution', wrapHandler((event, payload: { sessionId: string; questionId: string }) => {
     const previousState = appState;
     appState = revealWorkedSolution(appState, payload.sessionId, payload.questionId, new Date());
     persistStateIfChanged(previousState, { skipWebContentsId: event.sender.id });
     return buildSnapshotNowForWebContents(event.sender.id);
-  });
-  ipcMain.handle('session:self-check', (event, payload: { sessionId: string; questionId: string; rating: SelfCheckRating }) => {
+  }));
+  ipcMain.handle('session:self-check', wrapHandler((event, payload: { sessionId: string; questionId: string; rating: SelfCheckRating }) => {
     const previousState = appState;
     appState = recordSelfCheck(appState, payload.sessionId, payload.questionId, payload.rating);
     persistStateIfChanged(previousState, { skipWebContentsId: event.sender.id });
     return buildSnapshotNowForWebContents(event.sender.id);
-  });
-  ipcMain.handle('session:complete', async (event, payload: { sessionId: string }) => {
+  }));
+  ipcMain.handle('session:complete', wrapHandler(async (event, payload: { sessionId: string }) => {
     const previousState = appState;
     const completion = completeSession(appState, payload.sessionId, new Date());
     appState = completion.state;
@@ -503,7 +661,7 @@ function registerIpc(): void {
       reason: completion.reason,
       snapshot: buildSnapshotNowForWebContents(event.sender.id)
     };
-  });
+  }));
 }
 
 async function bootstrap(): Promise<void> {
@@ -538,9 +696,11 @@ app.on('before-quit', () => {
   if (reminderInterval) {
     clearInterval(reminderInterval);
   }
+  flushPendingWrites();
 });
 
 app.on('window-all-closed', () => {
+  flushPendingWrites();
   if (process.platform !== 'darwin') {
     app.quit();
   }

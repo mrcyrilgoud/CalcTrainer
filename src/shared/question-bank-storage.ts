@@ -780,6 +780,81 @@ export function saveQuestionBankFile(filePath: string, state: QuestionBankState)
   writeJsonFile(filePath, state);
 }
 
+export type QuestionBankPersistScheduler = {
+  schedule: (state: QuestionBankState) => void;
+  flush: () => void;
+  pending: () => boolean;
+  lastError: () => unknown;
+};
+
+export const DEFAULT_QUESTION_BANK_PERSIST_DEBOUNCE_MS = 100;
+export const DEFAULT_QUESTION_BANK_PERSIST_RETRY_MS = 1_000;
+
+export function createQuestionBankPersistScheduler(
+  filePath: string,
+  options: { debounceMs?: number; retryDelayMs?: number; onError?: (error: unknown) => void } = {}
+): QuestionBankPersistScheduler {
+  const debounceMs = options.debounceMs ?? DEFAULT_QUESTION_BANK_PERSIST_DEBOUNCE_MS;
+  const retryDelayMs = options.retryDelayMs ?? DEFAULT_QUESTION_BANK_PERSIST_RETRY_MS;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let pendingState: QuestionBankState | null = null;
+  let lastError: unknown = null;
+
+  const writeNow = (): void => {
+    if (!pendingState) {
+      return;
+    }
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+    const stateToWrite = pendingState;
+    try {
+      saveQuestionBankFile(filePath, stateToWrite);
+      if (pendingState === stateToWrite) {
+        pendingState = null;
+      }
+      lastError = null;
+    } catch (error) {
+      lastError = error;
+      console.error(`CalcTrainer question-bank persistence failed for ${filePath}; will retry.`, error);
+      try {
+        options.onError?.(error);
+      } catch (innerError) {
+        console.error('CalcTrainer persistence onError handler threw.', innerError);
+      }
+      if (!timer && pendingState) {
+        timer = setTimeout(() => {
+          timer = null;
+          writeNow();
+        }, retryDelayMs);
+      }
+    }
+  };
+
+  return {
+    schedule(state: QuestionBankState): void {
+      pendingState = state;
+      if (timer) {
+        return;
+      }
+      timer = setTimeout(() => {
+        timer = null;
+        writeNow();
+      }, debounceMs);
+    },
+    flush(): void {
+      writeNow();
+    },
+    pending(): boolean {
+      return pendingState !== null;
+    },
+    lastError(): unknown {
+      return lastError;
+    }
+  };
+}
+
 export function buildTopicLabelMap(questionBankState: QuestionBankState): Record<string, string> {
   const topicLabels: Record<string, string> = { ...SEEDED_TOPIC_LABELS };
   for (const topic of questionBankState.topics) {
