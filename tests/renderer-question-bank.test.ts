@@ -289,6 +289,70 @@ describe('renderer question bank dashboard', () => {
     expect(banner?.textContent ?? '').toContain('timed out');
   });
 
+  it('shows the initialization retry state when the initial snapshot request rejects', async () => {
+    Object.assign(window, {
+      calcTrainer: {
+        getSnapshot: vi.fn().mockRejectedValue(new Error('Main process unavailable.')),
+        getQuestionBank: vi.fn(),
+        openDashboard: vi.fn(),
+        openPractice: vi.fn(),
+        hidePracticeWindow: vi.fn(),
+        importDocuments: vi.fn(),
+        generateDraftBatch: vi.fn(),
+        updateDraft: vi.fn(),
+        deleteDraft: vi.fn(),
+        publishDrafts: vi.fn(),
+        archivePublished: vi.fn(),
+        updateSettings: vi.fn(),
+        submitAnswer: vi.fn(),
+        revealSolution: vi.fn(),
+        selfCheck: vi.fn(),
+        completeSession: vi.fn(),
+        onSnapshot: vi.fn(() => () => undefined)
+      }
+    });
+
+    await import('../src/renderer/renderer');
+    await flushRenderer();
+
+    const emptyState = document.querySelector('.empty-state');
+    expect(emptyState?.textContent ?? '').toContain('Could not load application state.');
+    expect(emptyState?.textContent ?? '').toContain('Main process unavailable.');
+    expect(document.querySelector('button[data-action="retry-load"]')).not.toBeNull();
+  });
+
+  it('keeps rendering and surfaces a banner when the initial question bank request rejects', async () => {
+    Object.assign(window, {
+      calcTrainer: {
+        getSnapshot: vi.fn().mockResolvedValue(baseSnapshot),
+        getQuestionBank: vi.fn().mockRejectedValue(new Error('Question bank backend unavailable.')),
+        openDashboard: vi.fn().mockResolvedValue(baseSnapshot),
+        openPractice: vi.fn().mockResolvedValue(baseSnapshot),
+        hidePracticeWindow: vi.fn().mockResolvedValue(baseSnapshot),
+        importDocuments: vi.fn(),
+        generateDraftBatch: vi.fn(),
+        updateDraft: vi.fn(),
+        deleteDraft: vi.fn(),
+        publishDrafts: vi.fn(),
+        archivePublished: vi.fn(),
+        updateSettings: vi.fn().mockResolvedValue(baseSnapshot),
+        submitAnswer: vi.fn(),
+        revealSolution: vi.fn(),
+        selfCheck: vi.fn(),
+        completeSession: vi.fn(),
+        onSnapshot: vi.fn(() => () => undefined)
+      }
+    });
+
+    await import('../src/renderer/renderer');
+    await flushRenderer();
+
+    expect(document.querySelector('[data-view="dashboard"]')).not.toBeNull();
+    const banner = document.querySelector('.status-banner');
+    expect(banner?.textContent ?? '').toContain('Question bank is unavailable right now.');
+    expect(banner?.textContent ?? '').toContain('Question bank backend unavailable.');
+  });
+
   it('disables the generate button while a generation request is in flight', async () => {
     let resolveGenerate: ((value: unknown) => void) | undefined;
     const slowGenerate = vi.fn().mockImplementation(() => new Promise((resolve) => {

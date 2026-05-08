@@ -442,8 +442,8 @@ function buildQuestionBankResult(message: string, ok = true) {
 }
 
 function registerIpc(): void {
-  ipcMain.handle('snapshot:get', wrapHandler((event) => buildSnapshotNowForWebContents(event.sender.id)));
-  ipcMain.handle('questionBank:get', wrapHandler(() => buildQuestionBankView(questionBankState)));
+  ipcMain.handle('snapshot:get', (event) => buildSnapshotNowForWebContents(event.sender.id));
+  ipcMain.handle('questionBank:get', () => buildQuestionBankView(questionBankState));
   ipcMain.handle('dashboard:open', wrapHandler(async (event) => {
     await createDashboardWindow();
     return buildSnapshotNowForWebContents(event.sender.id);
