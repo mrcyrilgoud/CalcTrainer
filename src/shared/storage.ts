@@ -256,3 +256,85 @@ export function saveStateFile(filePath: string, state: AppState): void {
     }
   }
 }
+
+/**
+ * Debounced wrapper around saveStateFile. Coalesces rapid mutations into a single
+ * disk write while still guaranteeing the latest in-memory state is persisted on
+ * a force-flush (e.g. on app quit). Persistence failures retain the pending state
+ * and trigger a retry on a short backoff so that a single transient I/O error
+ * cannot silently drop a write the IPC layer already reported as successful.
+ */
+export type StatePersistScheduler = {
+  schedule: (state: AppState) => void;
+  flush: () => void;
+  pending: () => boolean;
+  lastError: () => unknown;
+};
+
+export const DEFAULT_STATE_PERSIST_DEBOUNCE_MS = 100;
+export const DEFAULT_STATE_PERSIST_RETRY_MS = 1_000;
+
+export function createStatePersistScheduler(
+  filePath: string,
+  options: { debounceMs?: number; retryDelayMs?: number; onError?: (error: unknown) => void } = {}
+): StatePersistScheduler {
+  const debounceMs = options.debounceMs ?? DEFAULT_STATE_PERSIST_DEBOUNCE_MS;
+  const retryDelayMs = options.retryDelayMs ?? DEFAULT_STATE_PERSIST_RETRY_MS;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let pendingState: AppState | null = null;
+  let lastError: unknown = null;
+
+  const writeNow = (): void => {
+    if (!pendingState) {
+      return;
+    }
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+    const stateToWrite = pendingState;
+    try {
+      saveStateFile(filePath, stateToWrite);
+      if (pendingState === stateToWrite) {
+        pendingState = null;
+      }
+      lastError = null;
+    } catch (error) {
+      lastError = error;
+      console.error(`CalcTrainer state persistence failed for ${filePath}; will retry.`, error);
+      try {
+        options.onError?.(error);
+      } catch (innerError) {
+        console.error('CalcTrainer persistence onError handler threw.', innerError);
+      }
+      if (!timer && pendingState) {
+        timer = setTimeout(() => {
+          timer = null;
+          writeNow();
+        }, retryDelayMs);
+      }
+    }
+  };
+
+  return {
+    schedule(state: AppState): void {
+      pendingState = state;
+      if (timer) {
+        return;
+      }
+      timer = setTimeout(() => {
+        timer = null;
+        writeNow();
+      }, debounceMs);
+    },
+    flush(): void {
+      writeNow();
+    },
+    pending(): boolean {
+      return pendingState !== null;
+    },
+    lastError(): unknown {
+      return lastError;
+    }
+  };
+}
