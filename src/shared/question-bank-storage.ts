@@ -41,13 +41,28 @@ const LOW_LEVEL_MAX_DRAFTS_PER_REQUEST = 2;
 const RAW_FILE_DRAFTS_PER_REQUEST = 2;
 const RESPONSES_GENERATION_TIMEOUT_MS = 60_000;
 const LOW_LEVEL_GENERATION_TIMEOUT_MS = 120_000;
+const LOW_LEVEL_METADATA_PROBE_TIMEOUT_MS = 10_000;
 const LOW_LEVEL_METADATA_TTL_MS = 30_000;
-const LOW_LEVEL_METADATA_CACHE = new Map<string, { supported: boolean; resolvedTool: string; checkedAtMs: number }>();
-const LOW_LEVEL_METADATA_IN_FLIGHT = new Map<string, Promise<{ supported: boolean; resolvedTool: string; checkedAtMs: number }>>();
+type LowLevelMetadata = { supported: boolean; resolvedTool: string; checkedAtMs: number };
+const LOW_LEVEL_METADATA_CACHE = new Map<string, LowLevelMetadata>();
+const LOW_LEVEL_METADATA_IN_FLIGHT = new Map<string, Promise<LowLevelMetadata>>();
 
 export function resetProxyMetadataCacheForTests(): void {
   LOW_LEVEL_METADATA_CACHE.clear();
   LOW_LEVEL_METADATA_IN_FLIGHT.clear();
+}
+
+export function getLowLevelMetadataForTests(baseUrl: string, signal: AbortSignal, overrides: { tool?: string; headers?: Record<string, string> } = {}): Promise<LowLevelMetadata> {
+  return getLowLevelMetadata(
+    {
+      baseUrl,
+      headers: overrides.headers ?? {},
+      tool: overrides.tool ?? 'codex',
+      model: '',
+      parseMode: 'auto'
+    },
+    signal
+  );
 }
 
 type ProxyConfig = {
@@ -1927,7 +1942,7 @@ function parseToolMetadataResponse(body: { defaultTool?: unknown; tools?: unknow
   return fallbackTool;
 }
 
-async function probeLowLevelMetadata(proxyConfig: ProxyConfig, signal: AbortSignal): Promise<{ supported: boolean; resolvedTool: string; checkedAtMs: number }> {
+async function probeLowLevelMetadata(proxyConfig: ProxyConfig, signal: AbortSignal): Promise<LowLevelMetadata> {
   const checkedAtMs = Date.now();
   // When the tool is pinned via env, skip discovery so proxies without /api/tools still work.
   // raw_files mode still probes /api/tools so the proxy-advertised default can differ from `codex`.
@@ -1959,7 +1974,36 @@ async function probeLowLevelMetadata(proxyConfig: ProxyConfig, signal: AbortSign
   };
 }
 
-async function getLowLevelMetadata(proxyConfig: ProxyConfig, signal: AbortSignal): Promise<{ supported: boolean; resolvedTool: string; checkedAtMs: number }> {
+function createAbortError(): Error {
+  const error = new Error('The operation was aborted.');
+  error.name = 'AbortError';
+  return error;
+}
+
+function waitForSignal<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) {
+    return Promise.reject(createAbortError());
+  }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => {
+      signal.removeEventListener('abort', onAbort);
+      reject(createAbortError());
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      },
+      (error) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(error);
+      }
+    );
+  });
+}
+
+async function getLowLevelMetadata(proxyConfig: ProxyConfig, signal: AbortSignal): Promise<LowLevelMetadata> {
   const now = Date.now();
   const cached = LOW_LEVEL_METADATA_CACHE.get(proxyConfig.baseUrl);
   if (cached && (now - cached.checkedAtMs) < LOW_LEVEL_METADATA_TTL_MS) {
@@ -1968,10 +2012,12 @@ async function getLowLevelMetadata(proxyConfig: ProxyConfig, signal: AbortSignal
 
   const existingRequest = LOW_LEVEL_METADATA_IN_FLIGHT.get(proxyConfig.baseUrl);
   if (existingRequest) {
-    return existingRequest;
+    return waitForSignal(existingRequest, signal);
   }
 
-  const request = probeLowLevelMetadata(proxyConfig, signal)
+  const metadataController = new AbortController();
+  const metadataTimeout = setTimeout(() => metadataController.abort(), LOW_LEVEL_METADATA_PROBE_TIMEOUT_MS);
+  const request = probeLowLevelMetadata(proxyConfig, metadataController.signal)
     .then((metadata) => {
       LOW_LEVEL_METADATA_CACHE.set(proxyConfig.baseUrl, metadata);
       return metadata;
@@ -1982,11 +2028,12 @@ async function getLowLevelMetadata(proxyConfig: ProxyConfig, signal: AbortSignal
       checkedAtMs: Date.now()
     }))
     .finally(() => {
+      clearTimeout(metadataTimeout);
       LOW_LEVEL_METADATA_IN_FLIGHT.delete(proxyConfig.baseUrl);
     });
 
   LOW_LEVEL_METADATA_IN_FLIGHT.set(proxyConfig.baseUrl, request);
-  return request;
+  return waitForSignal(request, signal);
 }
 
 async function resolveLowLevelTool(proxyConfig: ProxyConfig, signal: AbortSignal): Promise<string> {

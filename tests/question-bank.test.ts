@@ -9,6 +9,7 @@ import {
   buildQuestionBankView,
   createDefaultQuestionBankState,
   generateDraftBatch,
+  getLowLevelMetadataForTests,
   getExtractedTextDir,
   getManagedDocumentsDir,
   importQuestionBankFiles,
@@ -728,6 +729,43 @@ describe('question bank pipeline', () => {
       } else {
         process.env.CALCTRAINER_AI_PROXY_PARSE_MODE = previousEnv.parseMode;
       }
+    }
+  });
+
+  it('does not abort a shared /api/tools probe when an earlier caller aborts', async () => {
+    const originalFetch = global.fetch;
+    let resolveToolsResponse: ((value: Response) => void) | null = null;
+
+    const fetchMock = vi.fn(() => new Promise<Response>((resolve) => {
+      resolveToolsResponse = resolve;
+    }));
+    global.fetch = fetchMock as typeof global.fetch;
+
+    const firstController = new AbortController();
+    const secondController = new AbortController();
+
+    try {
+      const firstRequest = getLowLevelMetadataForTests('http://proxy.test', firstController.signal);
+      const secondRequest = getLowLevelMetadataForTests('http://proxy.test', secondController.signal, { tool: 'fallback-tool' });
+
+      firstController.abort();
+      await expect(firstRequest).rejects.toMatchObject({ name: 'AbortError' });
+
+      resolveToolsResponse?.(new Response(JSON.stringify({
+        defaultTool: 'proxy-default',
+        tools: ['proxy-default']
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      }));
+
+      await expect(secondRequest).resolves.toMatchObject({
+        supported: true,
+        resolvedTool: 'proxy-default'
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally {
+      global.fetch = originalFetch;
     }
   });
 
