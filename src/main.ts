@@ -20,6 +20,7 @@ import {
   deleteDraftFromQuestionBank,
   generateDraftBatch,
   getQuestionBankFilePath as resolveQuestionBankFilePath,
+  importMarkdownQuestionFile,
   importQuestionBankFiles,
   loadQuestionBankFile,
   publishDraftsInQuestionBank,
@@ -518,6 +519,38 @@ function registerIpc(): void {
       messages.push(`Extraction failed for: ${importResult.extractionFailures.join(', ')}.`);
     }
     return buildQuestionBankResult(messages.join(' '), true);
+  }));
+  ipcMain.handle('questionBank:importMarkdownQuestions', wrapHandler(async (event) => {
+    const ownerWindow = BrowserWindow.fromWebContents(event.sender) ?? dashboardWindow ?? undefined;
+    const dialogOptions: OpenDialogOptions = {
+      properties: ['openFile'],
+      filters: [
+        {
+          name: 'Markdown',
+          extensions: ['md', 'markdown']
+        }
+      ]
+    };
+    const selected = ownerWindow
+      ? await dialog.showOpenDialog(ownerWindow, dialogOptions)
+      : await dialog.showOpenDialog(dialogOptions);
+    const [filePath] = selected.filePaths;
+    if (selected.canceled || !filePath) {
+      return buildQuestionBankResult('Markdown import cancelled.', false);
+    }
+
+    const previousQuestionBankState = questionBankState;
+    const result = await importMarkdownQuestionFile(
+      questionBankState,
+      filePath,
+      app.getPath('userData'),
+      new Date()
+    );
+    questionBankState = result.state;
+    persistQuestionBankIfChanged(previousQuestionBankState, { skipWebContentsId: event.sender.id });
+
+    const ok = !result.unsupported && !result.duplicate && result.draftCount > 0;
+    return buildQuestionBankResult(result.message, ok);
   }));
   ipcMain.handle('questionBank:generateDraftBatch', wrapHandler(async (event, payload: { documentIds: string[] }) => {
     if (activeDraftGeneration) {

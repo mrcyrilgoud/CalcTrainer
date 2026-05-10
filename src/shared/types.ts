@@ -28,10 +28,10 @@ export type SessionStatus = 'pending' | 'active' | 'completed';
 export type SelfCheckRating = 'needs_work' | 'solid';
 export type SelectionBucket = 'derivation' | 'backprop_auto' | 'cnn_auto' | 'concept';
 export type BankQuestionOrigin = 'seeded' | 'generated';
-export type DocumentKind = 'pdf' | 'pptx';
+export type DocumentKind = 'pdf' | 'pptx' | 'markdown';
 export type DocumentExtractionStatus = 'pending' | 'ready' | 'failed';
 export type GenerationBatchStatus = 'running' | 'drafts_ready' | 'partial_error' | 'generation_failed';
-export type QuestionGenerationMode = 'raw_files' | 'chunked_responses' | 'chunked_low_level';
+export type QuestionGenerationMode = 'raw_files' | 'chunked_responses' | 'chunked_low_level' | 'markdown_import';
 export type ProxyParseMode = 'auto' | 'raw_files' | 'chunked';
 
 export interface AppSettings {

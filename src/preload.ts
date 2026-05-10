@@ -11,6 +11,7 @@ contextBridge.exposeInMainWorld('calcTrainer', {
   hidePracticeWindow: () => ipcRenderer.invoke('practice:hide'),
   getQuestionBank: () => ipcRenderer.invoke('questionBank:get'),
   importDocuments: () => ipcRenderer.invoke('questionBank:importDocuments'),
+  importMarkdownQuestions: () => ipcRenderer.invoke('questionBank:importMarkdownQuestions'),
   generateDraftBatch: (payload: { documentIds: string[] }) => ipcRenderer.invoke('questionBank:generateDraftBatch', payload),
   updateDraft: (payload: { draftId: string; fields: Partial<DraftQuestionFields> }) =>
     ipcRenderer.invoke('questionBank:updateDraft', payload),
