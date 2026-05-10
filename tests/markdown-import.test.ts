@@ -132,6 +132,70 @@ Second solution.
     expect(result.questions[1]?.title).toBe('Second');
   });
 
+  it('does not split on --- lines inside a fenced code block', () => {
+    const withFencedSeparator = `---
+title: YAML example
+topicId: yaml
+topicLabel: YAML
+promptType: structured
+selectionBucket: concept
+answer:
+  kind: structured
+  acceptableAnswers:
+    - alpha
+---
+## Stem
+Consider the following frontmatter:
+\`\`\`yaml
+---
+key: value
+---
+\`\`\`
+
+## Worked solution
+The triple-dashes inside the code fence are part of the example.
+---
+`;
+    const result = parseMarkdownQuestions(withFencedSeparator);
+    expect(result.parseErrors).toEqual([]);
+    expect(result.questions).toHaveLength(1);
+    expect(result.questions[0]?.stem).toContain('---');
+    expect(result.questions[0]?.stem).toContain('key: value');
+    expect(result.questions[0]?.workedSolution).toContain('triple-dashes');
+  });
+
+  it('ignores section-heading lookalikes inside a fenced code block in the body', () => {
+    const fakeHeadingInside = `---
+title: Heading inside fence
+topicId: fences
+topicLabel: Fences
+promptType: structured
+selectionBucket: concept
+answer:
+  kind: structured
+  acceptableAnswers:
+    - ok
+---
+## Stem
+Here is some code that mentions worked solution textually:
+\`\`\`
+## Worked solution
+not really a section heading
+\`\`\`
+After the fence, still in the stem.
+
+## Worked solution
+The actual worked solution.
+---
+`;
+    const result = parseMarkdownQuestions(fakeHeadingInside);
+    expect(result.parseErrors).toEqual([]);
+    expect(result.questions).toHaveLength(1);
+    expect(result.questions[0]?.stem).toContain('not really a section heading');
+    expect(result.questions[0]?.stem).toContain('After the fence');
+    expect(result.questions[0]?.workedSolution).toBe('The actual worked solution.');
+  });
+
   it('strips a leading UTF-8 BOM so the first separator still matches', () => {
     const withBom = '﻿' + TWO_QUESTION_DOC;
     const result = parseMarkdownQuestions(withBom);

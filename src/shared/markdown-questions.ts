@@ -19,17 +19,39 @@ export type MarkdownParseResult = {
 
 const SEPARATOR_REGEX = /^---\s*$/;
 const HEADING_REGEX = /^##\s+(.+?)\s*$/;
+const FENCE_REGEX = /^(```+|~~~+)/;
 
+// Split on `---` lines, but ignore them while inside a fenced code block so a
+// YAML/code sample embedded in a stem or worked solution doesn't masquerade
+// as a question separator. Thematic breaks outside fences are still treated
+// as separators — authors who need a real thematic break inside a body should
+// use `***` or `___` instead.
 function splitBySeparator(source: string): string[] {
   const lines = source.split(/\r?\n/);
   const segments: string[] = [];
   let current: string[] = [];
+  let fenceMarker: string | null = null;
   for (const line of lines) {
-    if (SEPARATOR_REGEX.test(line)) {
-      segments.push(current.join('\n'));
-      current = [];
+    if (fenceMarker === null) {
+      const fenceMatch = FENCE_REGEX.exec(line);
+      if (fenceMatch) {
+        fenceMarker = fenceMatch[1] ?? null;
+        current.push(line);
+        continue;
+      }
+      if (SEPARATOR_REGEX.test(line)) {
+        segments.push(current.join('\n'));
+        current = [];
+        continue;
+      }
+      current.push(line);
     } else {
       current.push(line);
+      // Closing fence: same marker character, same or greater length, with no
+      // trailing info string content.
+      if (line.startsWith(fenceMarker) && /^[`~]+\s*$/.test(line)) {
+        fenceMarker = null;
+      }
     }
   }
   segments.push(current.join('\n'));
@@ -58,24 +80,42 @@ function extractBodySections(body: string): BodySections {
     workedSolution: []
   };
   let currentKey: keyof typeof sections | null = null;
+  let fenceMarker: string | null = null;
 
   for (const line of lines) {
-    const headingMatch = HEADING_REGEX.exec(line);
-    if (headingMatch) {
-      const normalized = (headingMatch[1] ?? '').trim().toLowerCase();
-      if (normalized === 'stem' || normalized === 'question' || normalized === 'prompt') {
-        currentKey = 'stem';
-      } else if (normalized === 'hint') {
-        currentKey = 'hint';
-      } else if (normalized === 'worked solution' || normalized === 'solution' || normalized === 'answer explanation') {
-        currentKey = 'workedSolution';
-      } else {
-        currentKey = null;
+    if (fenceMarker === null) {
+      const fenceMatch = FENCE_REGEX.exec(line);
+      if (fenceMatch) {
+        fenceMarker = fenceMatch[1] ?? null;
+        if (currentKey) {
+          sections[currentKey].push(line);
+        }
+        continue;
       }
-      continue;
-    }
-    if (currentKey) {
-      sections[currentKey].push(line);
+      const headingMatch = HEADING_REGEX.exec(line);
+      if (headingMatch) {
+        const normalized = (headingMatch[1] ?? '').trim().toLowerCase();
+        if (normalized === 'stem' || normalized === 'question' || normalized === 'prompt') {
+          currentKey = 'stem';
+        } else if (normalized === 'hint') {
+          currentKey = 'hint';
+        } else if (normalized === 'worked solution' || normalized === 'solution' || normalized === 'answer explanation') {
+          currentKey = 'workedSolution';
+        } else {
+          currentKey = null;
+        }
+        continue;
+      }
+      if (currentKey) {
+        sections[currentKey].push(line);
+      }
+    } else {
+      if (currentKey) {
+        sections[currentKey].push(line);
+      }
+      if (line.startsWith(fenceMarker) && /^[`~]+\s*$/.test(line)) {
+        fenceMarker = null;
+      }
     }
   }
 
