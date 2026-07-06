@@ -128,7 +128,7 @@ type QuestionGenerationBatch = {
   requestedDraftCount: number;
   draftIds: string[];
   status: 'running' | 'drafts_ready' | 'partial_error' | 'generation_failed';
-  generationMode: 'raw_files' | 'chunked_responses' | 'chunked_low_level';
+  generationMode: 'raw_files' | 'chunked_responses' | 'chunked_low_level' | 'markdown_import';
   completedRequestCount: number;
   totalRequestCount: number;
   repairedDraftCount: number;
@@ -139,7 +139,7 @@ type QuestionGenerationBatch = {
 type QuestionBankDocument = {
   id: string;
   fileName: string;
-  kind: 'pdf' | 'pptx';
+  kind: 'pdf' | 'pptx' | 'markdown';
   checksumSha256: string;
   importedAt: string;
   extractionStatus: 'pending' | 'ready' | 'failed';
@@ -1095,6 +1095,23 @@ function documentStatusLabel(document: QuestionBankDocument): string {
   return 'Waiting for extraction';
 }
 
+function documentKindLabel(kind: QuestionBankDocument['kind']): string {
+  return kind === 'markdown' ? 'MD' : kind.toUpperCase();
+}
+
+function generationModeLabel(mode: QuestionGenerationBatch['generationMode']): string {
+  switch (mode) {
+    case 'raw_files':
+      return 'raw files';
+    case 'chunked_responses':
+      return 'chunked responses';
+    case 'chunked_low_level':
+      return 'chunked low-level';
+    case 'markdown_import':
+      return 'markdown import';
+  }
+}
+
 function renderBanner(): string {
   return bannerMessage ? `<div class="status-banner" role="status" aria-live="polite">${escapeHtml(bannerMessage)}</div>` : '';
 }
@@ -1482,6 +1499,7 @@ function renderDocumentLibrary(questionBankValue: QuestionBankView | null): stri
       <p class="subtle">${escapeHtml(questionBankValue?.proxyStatus.message ?? 'Loading document and proxy state...')}</p>
       <div class="actions">
         <button class="secondary" data-action="import-documents">Import PDF or PPTX</button>
+        <button class="secondary" data-action="import-markdown-questions">Import Markdown questions</button>
         <button class="primary" data-action="generate-drafts" ${generateDisabled ? 'disabled' : ''}>Generate draft questions</button>
       </div>
       ${generateDisabled
@@ -1503,7 +1521,7 @@ function renderDocumentLibrary(questionBankValue: QuestionBankView | null): stri
                     />
                     <div class="document-copy">
                       <strong title="${escapeHtml(document.fileName)}">${escapeHtml(document.fileName)}</strong>
-                      <span class="small-copy">${escapeHtml(document.kind.toUpperCase())} • ${escapeHtml(documentStatusLabel(document))}</span>
+                      <span class="small-copy">${escapeHtml(documentKindLabel(document.kind))} • ${escapeHtml(documentStatusLabel(document))}</span>
                     </div>
                   </label>`
               )
@@ -1741,7 +1759,7 @@ function renderDraftReviewSection(questionBankValue: QuestionBankView | null): s
                       <h3 class="question-title">Batch ${escapeHtml(batch.id)}</h3>
                       <p class="small-copy">
                         Requested ${batch.requestedDraftCount} drafts
-                        • mode ${escapeHtml(batch.generationMode)}
+                        • mode ${escapeHtml(generationModeLabel(batch.generationMode))}
                         • status ${escapeHtml(batch.status)}
                         • requests ${batch.completedRequestCount}/${batch.totalRequestCount}
                         • repaired ${batch.repairedDraftCount}
@@ -2462,6 +2480,20 @@ appElement?.addEventListener('click', async (event) => {
     if (action === 'import-documents') {
       const result = await withLoadingAction('import-documents', button, () =>
         invokeIpc<QuestionBankMutationResult>('import-documents', () => window.calcTrainer.importDocuments())
+      );
+      if (!result) {
+        return;
+      }
+      if (result.ok) {
+        clearAllDraftEditValues();
+      }
+      applyQuestionBankResult(result);
+      return;
+    }
+
+    if (action === 'import-markdown-questions') {
+      const result = await withLoadingAction('import-markdown-questions', button, () =>
+        invokeIpc<QuestionBankMutationResult>('import-markdown-questions', () => window.calcTrainer.importMarkdownQuestions())
       );
       if (!result) {
         return;

@@ -5,6 +5,7 @@ interface CalcTrainerApi {
   openPractice(): Promise<unknown>;
   hidePracticeWindow(): Promise<unknown>;
   importDocuments(): Promise<unknown>;
+  importMarkdownQuestions(): Promise<unknown>;
   generateDraftBatch(payload: { documentIds: string[] }): Promise<unknown>;
   updateDraft(payload: { draftId: string; fields: Record<string, unknown> }): Promise<unknown>;
   deleteDraft(payload: { draftId?: string; batchId?: string }): Promise<unknown>;

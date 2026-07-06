@@ -4,6 +4,7 @@ import path from 'node:path';
 
 import JSZip from 'jszip';
 
+import { parseMarkdownQuestions } from './markdown-questions';
 import { SESSION_QUESTION_COUNT } from './settings';
 import {
   AnswerSchema,
@@ -543,7 +544,14 @@ function hydrateDocument(raw: unknown): QuestionBankDocument | null {
   const record = raw as Partial<QuestionBankDocument>;
   const id = normalizeString(record.id);
   const fileName = normalizeString(record.fileName);
-  const kind = record.kind === 'pptx' ? 'pptx' : record.kind === 'pdf' ? 'pdf' : null;
+  const kind =
+    record.kind === 'pptx'
+      ? 'pptx'
+      : record.kind === 'pdf'
+        ? 'pdf'
+        : record.kind === 'markdown'
+          ? 'markdown'
+          : null;
   const checksumSha256 = normalizeString(record.checksumSha256);
   const storedFileName = normalizeString(record.storedFileName);
   if (!id || !fileName || !kind || !checksumSha256 || !storedFileName) {
@@ -654,6 +662,7 @@ function hydrateBatch(raw: unknown): QuestionGenerationBatch | null {
     record.generationMode === 'raw_files'
     || record.generationMode === 'chunked_responses'
     || record.generationMode === 'chunked_low_level'
+    || record.generationMode === 'markdown_import'
       ? record.generationMode
       : 'chunked_responses';
 
@@ -1261,6 +1270,201 @@ export async function importQuestionBankFiles(
     duplicateFiles,
     unsupportedFiles,
     extractionFailures
+  };
+}
+
+export async function importMarkdownQuestionFile(
+  questionBankState: QuestionBankState,
+  filePath: string,
+  userDataDir: string,
+  now: Date = new Date()
+): Promise<{
+  state: QuestionBankState;
+  importedCount: number;
+  draftCount: number;
+  validDraftCount: number;
+  parseErrorCount: number;
+  duplicate: boolean;
+  unsupported: boolean;
+  message: string;
+  batchId?: string;
+}> {
+  const extension = path.extname(filePath).toLowerCase();
+  if (extension !== '.md' && extension !== '.markdown') {
+    return {
+      state: questionBankState,
+      importedCount: 0,
+      draftCount: 0,
+      validDraftCount: 0,
+      parseErrorCount: 0,
+      duplicate: false,
+      unsupported: true,
+      message: `Unsupported file: ${path.basename(filePath)}.`
+    };
+  }
+
+  fs.mkdirSync(getManagedDocumentsDir(userDataDir), { recursive: true });
+  fs.mkdirSync(getExtractedTextDir(userDataDir), { recursive: true });
+
+  const fileBuffer = fs.readFileSync(filePath);
+  const checksumSha256 = computeSha256(fileBuffer);
+  if (questionBankState.documents.some((document) => document.checksumSha256 === checksumSha256)) {
+    return {
+      state: questionBankState,
+      importedCount: 0,
+      draftCount: 0,
+      validDraftCount: 0,
+      parseErrorCount: 0,
+      duplicate: true,
+      unsupported: false,
+      message: `Skipped duplicate: ${path.basename(filePath)}.`
+    };
+  }
+
+  const documentId = createId('doc');
+  const storedFileName = `${documentId}${extension}`;
+  fs.copyFileSync(filePath, getManagedDocumentFilePath(userDataDir, storedFileName));
+
+  const fileName = path.basename(filePath);
+  const parseResult = parseMarkdownQuestions(fileBuffer.toString('utf8'), {
+    defaultSource: fileName,
+    documentId,
+    documentName: fileName
+  });
+  const parseErrorCount = parseResult.parseErrors.length;
+
+  let extractionStatus: QuestionBankDocument['extractionStatus'] = 'ready';
+  let extractionError: string | undefined;
+  let extractedTextFileName: string | undefined;
+
+  if (parseResult.chunks.length > 0) {
+    extractedTextFileName = await saveExtractedChunks(userDataDir, documentId, parseResult.chunks);
+  } else {
+    extractionStatus = 'failed';
+    extractionError = parseResult.parseErrors[0]?.message ?? 'No questions were found in this Markdown file.';
+  }
+
+  const document: QuestionBankDocument = {
+    id: documentId,
+    fileName,
+    kind: 'markdown',
+    checksumSha256,
+    importedAt: stableNow(now),
+    storedFileName,
+    extractedTextFileName,
+    extractionStatus,
+    extractionError,
+    chunkCount: parseResult.chunks.length
+  };
+
+  let nextState: QuestionBankState = {
+    ...questionBankState,
+    documents: [...questionBankState.documents, document]
+  };
+
+  if (parseResult.questions.length === 0) {
+    return {
+      state: nextState,
+      importedCount: 1,
+      draftCount: 0,
+      validDraftCount: 0,
+      parseErrorCount,
+      duplicate: false,
+      unsupported: false,
+      message: parseErrorCount > 0
+        ? `Imported ${fileName}, but found ${parseErrorCount} parse error${parseErrorCount === 1 ? '' : 's'} and 0 questions.`
+        : `Imported ${fileName}, but no questions were found.`
+    };
+  }
+
+  const batchId = createId('batch');
+  const batchCreatedAt = stableNow(now);
+  const drafts: GeneratedQuestionDraft[] = [];
+  // We just wrote these chunks above — read them once and resolve all draft citations
+  // against this single in-memory copy instead of reloading the file per draft.
+  const documentChunks = parseResult.chunks;
+  let rawIndex = 0;
+
+  for (const rawQuestion of parseResult.questions) {
+    const validation = validateDraftFields(rawQuestion, {
+      defaultSource: fileName,
+      defaultDocument: document
+    });
+    const citationIssues: DraftValidationIssue[] = [];
+    const resolvedCitations: DraftQuestionSourceRef[] = validation.fields.citations.map((citation) => {
+      const resolvedChunkId = resolveCitationChunkId(citation, documentChunks);
+      if (!resolvedChunkId) {
+        citationIssues.push({
+          field: 'citations',
+          message: `Citation could not be resolved for ${fileName} at ${citation.locatorLabel}.`
+        });
+      }
+      return {
+        ...citation,
+        documentName: citation.documentName || fileName,
+        chunkId: resolvedChunkId
+      };
+    });
+    drafts.push({
+      id: createId('draft'),
+      batchId,
+      createdAt: batchCreatedAt,
+      updatedAt: batchCreatedAt,
+      rawIndex,
+      ...validation.fields,
+      citations: resolvedCitations,
+      validationIssues: [...validation.issues, ...citationIssues]
+    });
+    rawIndex += 1;
+  }
+
+  const hasInvalidDraft = drafts.some((draft) => draft.validationIssues.length > 0);
+  const batchStatus: GenerationBatchStatus = parseErrorCount > 0 || hasInvalidDraft ? 'partial_error' : 'drafts_ready';
+
+  const batch: QuestionGenerationBatch = {
+    id: batchId,
+    createdAt: batchCreatedAt,
+    updatedAt: batchCreatedAt,
+    documentIds: [documentId],
+    requestedDraftCount: drafts.length,
+    draftIds: drafts.map((draft) => draft.id),
+    status: batchStatus,
+    generationMode: 'markdown_import',
+    completedRequestCount: 1,
+    totalRequestCount: 1,
+    repairedDraftCount: 0,
+    errorMessage: parseErrorCount > 0
+      ? parseResult.parseErrors.map((error) => error.message).join(' ')
+      : undefined
+  };
+
+  nextState = {
+    ...nextState,
+    drafts: [...drafts, ...nextState.drafts],
+    batches: [batch, ...nextState.batches]
+  };
+
+  const validDraftCount = drafts.filter((draft) => draft.validationIssues.length === 0).length;
+  const messageParts = [
+    `Imported ${fileName} with ${drafts.length} draft question${drafts.length === 1 ? '' : 's'}.`
+  ];
+  if (validDraftCount < drafts.length) {
+    messageParts.push(`${drafts.length - validDraftCount} need attention before publishing.`);
+  }
+  if (parseErrorCount > 0) {
+    messageParts.push(`${parseErrorCount} parse error${parseErrorCount === 1 ? '' : 's'}.`);
+  }
+
+  return {
+    state: nextState,
+    importedCount: 1,
+    draftCount: drafts.length,
+    validDraftCount,
+    parseErrorCount,
+    duplicate: false,
+    unsupported: false,
+    message: messageParts.join(' '),
+    batchId
   };
 }
 
