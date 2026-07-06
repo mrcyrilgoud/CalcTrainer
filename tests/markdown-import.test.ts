@@ -132,6 +132,62 @@ Second solution.
     expect(result.questions[1]?.title).toBe('Second');
   });
 
+  it('treats an unheaded body as the stem so authors can omit ## Stem', () => {
+    const noHeadings = `---
+title: Plain prose
+topicId: prose
+topicLabel: Prose
+promptType: structured
+selectionBucket: concept
+workedSolution: The answer.
+answer:
+  kind: structured
+  acceptableAnswers:
+    - answer
+---
+What is the answer to the question written as plain prose
+without any explicit section headings?
+---
+`;
+    const result = parseMarkdownQuestions(noHeadings);
+    expect(result.parseErrors).toEqual([]);
+    expect(result.questions).toHaveLength(1);
+    expect(result.questions[0]?.stem).toContain('What is the answer');
+    expect(result.questions[0]?.stem).toContain('plain prose');
+    expect(result.questions[0]?.workedSolution).toBe('The answer.');
+  });
+
+  it('treats indented fenced code blocks as fences so indented --- is not a separator', () => {
+    const indentedFence = `---
+title: Indented fence
+topicId: fences
+topicLabel: Fences
+promptType: structured
+selectionBucket: concept
+answer:
+  kind: structured
+  acceptableAnswers:
+    - alpha
+---
+## Stem
+Here is an indented fenced block (3 spaces):
+
+   \`\`\`yaml
+   ---
+   key: value
+   ---
+   \`\`\`
+
+## Worked solution
+Indented fences should still hide the inner triple-dashes.
+---
+`;
+    const result = parseMarkdownQuestions(indentedFence);
+    expect(result.parseErrors).toEqual([]);
+    expect(result.questions).toHaveLength(1);
+    expect(result.questions[0]?.stem).toContain('key: value');
+  });
+
   it('does not split on --- lines inside a fenced code block', () => {
     const withFencedSeparator = `---
 title: YAML example

@@ -19,7 +19,15 @@ export type MarkdownParseResult = {
 
 const SEPARATOR_REGEX = /^---\s*$/;
 const HEADING_REGEX = /^##\s+(.+?)\s*$/;
-const FENCE_REGEX = /^(```+|~~~+)/;
+// CommonMark allows fenced code blocks to be indented by up to 3 spaces.
+const FENCE_OPEN_REGEX = /^ {0,3}(```+|~~~+)/;
+const FENCE_CLOSE_LEADING_SPACE_REGEX = /^ {0,3}/;
+const FENCE_CLOSE_TAIL_REGEX = /^[`~]+\s*$/;
+
+function isFenceCloser(line: string, fenceMarker: string): boolean {
+  const trimmed = line.replace(FENCE_CLOSE_LEADING_SPACE_REGEX, '');
+  return trimmed.startsWith(fenceMarker) && FENCE_CLOSE_TAIL_REGEX.test(trimmed);
+}
 
 // Split on `---` lines, but ignore them while inside a fenced code block so a
 // YAML/code sample embedded in a stem or worked solution doesn't masquerade
@@ -33,7 +41,7 @@ function splitBySeparator(source: string): string[] {
   let fenceMarker: string | null = null;
   for (const line of lines) {
     if (fenceMarker === null) {
-      const fenceMatch = FENCE_REGEX.exec(line);
+      const fenceMatch = FENCE_OPEN_REGEX.exec(line);
       if (fenceMatch) {
         fenceMarker = fenceMatch[1] ?? null;
         current.push(line);
@@ -47,9 +55,7 @@ function splitBySeparator(source: string): string[] {
       current.push(line);
     } else {
       current.push(line);
-      // Closing fence: same marker character, same or greater length, with no
-      // trailing info string content.
-      if (line.startsWith(fenceMarker) && /^[`~]+\s*$/.test(line)) {
+      if (isFenceCloser(line, fenceMarker)) {
         fenceMarker = null;
       }
     }
@@ -81,10 +87,11 @@ function extractBodySections(body: string): BodySections {
   };
   let currentKey: keyof typeof sections | null = null;
   let fenceMarker: string | null = null;
+  let recognizedHeadingSeen = false;
 
   for (const line of lines) {
     if (fenceMarker === null) {
-      const fenceMatch = FENCE_REGEX.exec(line);
+      const fenceMatch = FENCE_OPEN_REGEX.exec(line);
       if (fenceMatch) {
         fenceMarker = fenceMatch[1] ?? null;
         if (currentKey) {
@@ -97,10 +104,13 @@ function extractBodySections(body: string): BodySections {
         const normalized = (headingMatch[1] ?? '').trim().toLowerCase();
         if (normalized === 'stem' || normalized === 'question' || normalized === 'prompt') {
           currentKey = 'stem';
+          recognizedHeadingSeen = true;
         } else if (normalized === 'hint') {
           currentKey = 'hint';
+          recognizedHeadingSeen = true;
         } else if (normalized === 'worked solution' || normalized === 'solution' || normalized === 'answer explanation') {
           currentKey = 'workedSolution';
+          recognizedHeadingSeen = true;
         } else {
           currentKey = null;
         }
@@ -113,10 +123,17 @@ function extractBodySections(body: string): BodySections {
       if (currentKey) {
         sections[currentKey].push(line);
       }
-      if (line.startsWith(fenceMarker) && /^[`~]+\s*$/.test(line)) {
+      if (isFenceCloser(line, fenceMarker)) {
         fenceMarker = null;
       }
     }
+  }
+
+  // If the author wrote a body with no recognized section headings, treat the
+  // whole body as the stem. Otherwise valid free-form questions would fail
+  // validation purely because they didn't use `## Stem`.
+  if (!recognizedHeadingSeen) {
+    return { stem: trimMultiline(body) };
   }
 
   return {
